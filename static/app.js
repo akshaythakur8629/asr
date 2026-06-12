@@ -111,14 +111,14 @@ async function startWebSocketStream() {
 
   // Diagnostics init
   liveChunkCount = 0;
-  liveStartTime = Date.now();
+  liveStartTime = null;
   $('diag-duration').textContent = '0.0s';
   $('diag-chunks').textContent = '0';
   $('diag-latency').textContent = '--ms';
   $('diag-language').textContent = language.split('-')[0].toUpperCase();
 
   liveInterval = setInterval(() => {
-    const elapsed = ((Date.now() - liveStartTime) / 1000).toFixed(1);
+    const elapsed = liveStartTime ? ((Date.now() - liveStartTime) / 1000).toFixed(1) : '0.0';
     $('diag-duration').textContent = elapsed + 's';
   }, 200);
 
@@ -152,6 +152,9 @@ async function startWebSocketStream() {
         }
         
         if (ws && ws.readyState === WebSocket.OPEN) {
+          if (!liveStartTime) {
+            liveStartTime = Date.now();
+          }
           ws.send(pcm16.buffer);
           liveChunkCount++;
           $('diag-chunks').textContent = liveChunkCount;
@@ -170,7 +173,13 @@ async function startWebSocketStream() {
       if (formattedText) {
         const speakerClass = data.speaker === 'customer' ? 'speaker-customer' : 'speaker-agent';
         const speakerName = data.speaker === 'customer' ? 'Customer' : 'Agent';
-        const timeRange = `${Number(data.start).toFixed(2)}–${Number(data.end).toFixed(2)}s`;
+        const elapsedSinceStart = liveStartTime ? (Date.now() - liveStartTime) / 1000 : 0;
+        const latencySec = elapsedSinceStart - Number(data.end);
+        const latencyMs = Math.max(0, Math.round(latencySec * 1000));
+        
+        $('diag-latency').textContent = `${latencyMs}ms`;
+        
+        const timeRange = `${Number(data.start).toFixed(2)}–${Number(data.end).toFixed(2)}s (latency: ${latencyMs}ms)`;
         
         const turnDiv = document.getElementById('live-transcript');
         if (turnDiv) {

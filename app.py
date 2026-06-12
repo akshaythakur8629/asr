@@ -131,7 +131,8 @@ async def websocket_stream(
     denoise: str = "true",
     vad: str = "true",
     diarize: str = "false",
-    input_rate: int = 16000
+    input_rate: int = 16000,
+    chunk_ms: int = 320
 ):
     await handle_websocket_stream(
         websocket=websocket,
@@ -140,7 +141,8 @@ async def websocket_stream(
         denoise=denoise,
         vad=vad,
         diarize=diarize,
-        input_rate=input_rate
+        input_rate=input_rate,
+        chunk_ms=chunk_ms
     )
 
 

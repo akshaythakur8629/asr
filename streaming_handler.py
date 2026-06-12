@@ -1,5 +1,6 @@
 import shutil
 import uuid
+import asyncio
 from pathlib import Path
 from fastapi import WebSocket, WebSocketDisconnect
 from audio_processing import write_pcm16_wav, slice_wav, normalize_audio
@@ -15,7 +16,8 @@ async def handle_websocket_stream(
     denoise: str = "true",
     vad: str = "true",
     diarize: str = "false",
-    input_rate: int = 16000
+    input_rate: int = 16000,
+    chunk_ms: int = 160
 ):
     await websocket.accept()
     
@@ -31,7 +33,7 @@ async def handle_websocket_stream(
     store._ensure_models()
     
     # Store audio as raw bytearray of 16-bit mono 16kHz PCM
-    chunk_bytes = int(input_rate * 2 * 0.320)
+    chunk_bytes = int(input_rate * 2 * (chunk_ms / 1000.0))
     audio_buffer = bytearray()
     last_processed_len = 0
     last_finalized_end_sec = 0.0
@@ -45,7 +47,7 @@ async def handle_websocket_stream(
             
             audio_buffer.extend(chunk)
             
-            # Process every ~320ms based on input rate
+            # Process every chunk_ms based on input rate
             if len(audio_buffer) - last_processed_len >= chunk_bytes:
                 last_processed_len = len(audio_buffer)
                 
@@ -53,17 +55,17 @@ async def handle_websocket_stream(
                 raw_wav_path = session_dir / "raw.wav"
                 if input_rate != 16000:
                     raw_in_path = session_dir / "raw_in.wav"
-                    write_pcm16_wav(raw_in_path, bytes(audio_buffer), input_rate)
-                    normalize_audio(raw_in_path, raw_wav_path, 16000)
+                    await asyncio.to_thread(write_pcm16_wav, raw_in_path, bytes(audio_buffer), input_rate)
+                    await asyncio.to_thread(normalize_audio, raw_in_path, raw_wav_path, 16000)
                 else:
-                    write_pcm16_wav(raw_wav_path, bytes(audio_buffer), 16000)
+                    await asyncio.to_thread(write_pcm16_wav, raw_wav_path, bytes(audio_buffer), 16000)
                 
                 # Apply Denoise if enabled
                 transcribe_source = raw_wav_path
                 if is_denoise and store.preprocessor:
                     denoised_wav_path = session_dir / "denoised.wav"
                     try:
-                        store.preprocessor.denoise_wav(raw_wav_path, denoised_wav_path)
+                        await asyncio.to_thread(store.preprocessor.denoise_wav, raw_wav_path, denoised_wav_path)
                         transcribe_source = denoised_wav_path
                     except Exception as e:
                         print(f"Stream Denoise error: {e}")
@@ -72,8 +74,9 @@ async def handle_websocket_stream(
                 
                 if is_vad:
                     try:
-                        wav = read_audio(str(transcribe_source), sampling_rate=16000)
-                        spans = get_speech_timestamps(
+                        wav = await asyncio.to_thread(read_audio, str(transcribe_source), sampling_rate=16000)
+                        spans = await asyncio.to_thread(
+                            get_speech_timestamps,
                             wav, store.diarizer._silero(), sampling_rate=16000,
                             threshold=0.4, min_silence_duration_ms=400, speech_pad_ms=100,
                             return_seconds=True
