@@ -33,7 +33,7 @@ async def handle_websocket_stream(
     store._ensure_models()
     
     # Store audio as raw bytearray of 16-bit mono 16kHz PCM
-    chunk_bytes = int(input_rate * 2 * (chunk_ms / 1000.0))
+    chunk_bytes = int(input_rate * 2 * (chunk_ms / 1000.0)) if chunk_ms > 0 else 0
     audio_buffer = bytearray()
     last_processed_len = 0
     last_finalized_end_sec = 0.0
@@ -47,8 +47,9 @@ async def handle_websocket_stream(
             
             audio_buffer.extend(chunk)
             
-            # Process every chunk_ms based on input rate
-            if len(audio_buffer) - last_processed_len >= chunk_bytes:
+            # Process every chunk_ms based on input rate (or immediately if chunk_ms is 0)
+            bytes_to_process = chunk_bytes if chunk_ms > 0 else 1
+            if len(audio_buffer) - last_processed_len >= bytes_to_process:
                 last_processed_len = len(audio_buffer)
                 
                 # Write current buffer to a temp WAV file, upsampling if needed
@@ -94,7 +95,7 @@ async def handle_websocket_stream(
                                 if span_end - span_start > 0.05:
                                     # Slice turn audio
                                     turn_wav_path = session_dir / "turn.wav"
-                                    slice_wav(transcribe_source, turn_wav_path, span_start, span_end)
+                                    await asyncio.to_thread(slice_wav, transcribe_source, turn_wav_path, span_start, span_end)
                                     
                                     # Transcribe the active turn
                                     text = await store.asr.transcribe_async(turn_wav_path, language=language)
@@ -146,4 +147,4 @@ async def handle_websocket_stream(
         print(f"WebSocket error: {e}")
     finally:
         # Cleanup session directory
-        shutil.rmtree(session_dir, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, session_dir, ignore_errors=True)

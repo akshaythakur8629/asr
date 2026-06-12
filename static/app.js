@@ -122,9 +122,23 @@ async function startWebSocketStream() {
     $('diag-duration').textContent = elapsed + 's';
   }, 200);
 
+  const chunkMs = Number($('chunk').value) || 0;
+  let scriptBufferSize = 2048;
+  if (chunkMs === 0 || chunkMs <= 80) {
+    scriptBufferSize = 1024; // ~64ms capture latency
+  } else if (chunkMs <= 160) {
+    scriptBufferSize = 2048; // ~128ms capture latency
+  } else if (chunkMs <= 320) {
+    scriptBufferSize = 4096; // ~256ms capture latency
+  } else if (chunkMs <= 560) {
+    scriptBufferSize = 8192;
+  } else {
+    scriptBufferSize = 16384;
+  }
+
   const loc = window.location;
   const wsProtocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${wsProtocol}//${loc.host}/api/stream?language=${language}&denoise=${denoise}&vad=${vad}`;
+  const wsUrl = `${wsProtocol}//${loc.host}/api/stream?language=${language}&denoise=${denoise}&vad=${vad}&chunk_ms=${chunkMs}`;
   
   ws = new WebSocket(wsUrl);
   
@@ -138,26 +152,52 @@ async function startWebSocketStream() {
       const source = audioContext.createMediaStreamSource(audioStream);
       
       // Create script processor for 16kHz mono audio
-      audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+      audioProcessor = audioContext.createScriptProcessor(scriptBufferSize, 1, 1);
       source.connect(audioProcessor);
       audioProcessor.connect(audioContext.destination);
+      
+      const sampleRate = 16000;
+      const targetSamples = chunkMs > 0 ? Math.round(sampleRate * (chunkMs / 1000)) : 0;
+      let sampleBuffer = [];
       
       audioProcessor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
         
-        // Convert float32 array to 16-bit signed PCM
-        const pcm16 = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          pcm16[i] = Math.min(1, Math.max(-1, inputData[i])) * 0x7FFF;
-        }
-        
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          if (!liveStartTime) {
-            liveStartTime = Date.now();
+        if (targetSamples > 0) {
+          // Accumulate samples for exact-size chunking
+          for (let i = 0; i < inputData.length; i++) {
+            sampleBuffer.push(inputData[i]);
           }
-          ws.send(pcm16.buffer);
-          liveChunkCount++;
-          $('diag-chunks').textContent = liveChunkCount;
+          
+          while (sampleBuffer.length >= targetSamples) {
+            const chunk = sampleBuffer.splice(0, targetSamples);
+            const pcm16 = new Int16Array(chunk.length);
+            for (let i = 0; i < chunk.length; i++) {
+              pcm16[i] = Math.min(1, Math.max(-1, chunk[i])) * 0x7FFF;
+            }
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              if (!liveStartTime) {
+                liveStartTime = Date.now();
+              }
+              ws.send(pcm16.buffer);
+              liveChunkCount++;
+              $('diag-chunks').textContent = liveChunkCount;
+            }
+          }
+        } else {
+          // No buffering: send raw script processor chunk immediately
+          const pcm16 = new Int16Array(inputData.length);
+          for (let i = 0; i < inputData.length; i++) {
+            pcm16[i] = Math.min(1, Math.max(-1, inputData[i])) * 0x7FFF;
+          }
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            if (!liveStartTime) {
+              liveStartTime = Date.now();
+            }
+            ws.send(pcm16.buffer);
+            liveChunkCount++;
+            $('diag-chunks').textContent = liveChunkCount;
+          }
         }
       };
     } catch (err) {
