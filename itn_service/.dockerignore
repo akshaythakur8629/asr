@@ -1,0 +1,19 @@
+# Keep the build context small and reproducible.
+
+# Tests and benchmarks: shipped via the source repo, not the image.
+tests/
+**/__pycache__/
+*.pyc
+
+# Local-only artefacts.
+.venv/
+.env
+*.egg-info/
+build/
+dist/
+compiled_grammars/
+
+# Editor noise.
+.vscode/
+.idea/
+.DS_Store

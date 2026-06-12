@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  sarga:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sarga-speech-platform
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount the host's HuggingFace/Torch cache to skip model downloads
+      - /home/ubuntu/.cache:/root/.cache
+      # Mount the temp directory for job artifacts
+      - /tmp/nemotron-test:/tmp/nemotron-test
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped

@@ -1,0 +1,197 @@
+# locales.yaml — per-language and per-tenant locale policy.
+#
+# `script` follows ISO 15924. `numbering_systems` lists CLDR numbering
+# system identifiers (see CLDR `numberingSystems` data); the first entry
+# is the canonical storage form (always Latin per policy.yaml). The rest
+# are display-only options.
+#
+# `date_order` is the policy used to disambiguate purely numeric dates
+# (e.g. 12/05/2026). Plain numeric dates outside an explicit policy are
+# deferred — see thresholds.yaml.
+#
+# `currency` is the default ISO 4217 code assumed when an amount carries
+# only a generic currency cue (e.g. "rupees" in an Indian-locale call).
+#
+# `currency_cues` (optional) lists the per-language lemmas that the
+# money grammar accepts as a currency cue. `accept` is the recognition
+# vocabulary (any of these surface forms triggers the money branch);
+# `canonical` is the symbol that the canonical Latin-digit output is
+# prefixed with regardless of which cue was recognised. When the
+# locale has regional variants (e.g. bn-IN vs bn-BD) the variant
+# entries override the base locale; consumers should call
+# locale_policy.currency_cues_for(lang, tenant) which walks
+# region -> base-lang -> defaults in that order. This block is the
+# single source of truth for cue alternatives — money grammars must
+# not hard-code their lemma list.
+#
+# Tenant policy:
+#
+# `tenants` maps tenant identifiers to per-tenant locale overrides.
+# `defaults.tenant` is the policy used when no tenant id is supplied or
+# when an unknown tenant id is requested. Per-tenant `date_order`
+# overrides the language default; this is the knob that decides whether
+# the numeric-date branch of the date grammar is allowed to fire on a
+# given call (see grammars/hi/date.py and runtime/locale_policy.py).
+
+version: "0.0.0"
+
+defaults:
+  date_order: "DMY"           # day-first; consistent with the plan's seed examples
+  currency: "INR"
+  decimal_separator: "."
+  group_separator: ","
+  group_style: "indian"        # 1,25,000 grouping for Indic locales
+  tenant: "default"            # fallback tenant id when none is supplied
+
+locales:
+  hi:
+    name: "Hindi"
+    script: "Deva"
+    numbering_systems: ["latn", "deva"]
+    date_order: "DMY"
+    currency: "INR"
+    currency_cues:
+      accept: ["रुपये", "रुपया", "रू", "₹", "Rs", "Rs.", "INR"]
+      canonical: "₹"
+      paise_accept: ["पैसे", "पैसा"]
+
+  mr:
+    name: "Marathi"
+    script: "Deva"
+    numbering_systems: ["latn", "deva"]
+    date_order: "DMY"
+    currency: "INR"
+    currency_cues:
+      accept: ["रुपये", "रुपया", "रू", "₹", "Rs", "Rs.", "INR"]
+      canonical: "₹"
+      paise_accept: ["पैसे", "पैसा"]
+
+  bn:
+    name: "Bengali"
+    script: "Beng"
+    numbering_systems: ["latn", "beng"]
+    date_order: "DMY"
+    currency: "INR"
+    # Bengali speakers in India and Bangladesh use different default
+    # currency lemmas. For India tenants the default policy accepts
+    # either টাকা ("taka", historically retained as a colloquial rupee
+    # word) or রুপি ("rupee"); the canonical output is always ₹ — the
+    # tenant's ISO currency is what defines storage, not the spoken
+    # cue. Bangladesh tenants must override via the bn-BD regional
+    # entry below (canonical ৳ / BDT). See currency_cues docs above.
+    currency_cues:
+      accept: ["টাকা", "রুপি", "রুপী", "রুপিয়া", "₹", "Rs", "Rs.", "INR"]
+      canonical: "₹"
+      paise_accept: ["পয়সা", "পয়সে"]
+
+  bn-IN:
+    name: "Bengali (India)"
+    script: "Beng"
+    numbering_systems: ["latn", "beng"]
+    date_order: "DMY"
+    currency: "INR"
+    inherits: "bn"
+
+  bn-BD:
+    name: "Bengali (Bangladesh)"
+    script: "Beng"
+    numbering_systems: ["latn", "beng"]
+    date_order: "DMY"
+    currency: "BDT"
+    inherits: "bn"
+    currency_cues:
+      accept: ["টাকা", "৳", "BDT", "Tk", "Tk."]
+      canonical: "৳"
+      paise_accept: ["পয়সা", "পয়সে"]
+
+  ta:
+    name: "Tamil"
+    script: "Taml"
+    numbering_systems: ["latn", "tamldec"]
+    date_order: "DMY"
+    currency: "INR"
+
+  te:
+    name: "Telugu"
+    script: "Telu"
+    numbering_systems: ["latn", "telu"]
+    date_order: "DMY"
+    currency: "INR"
+
+  kn:
+    name: "Kannada"
+    script: "Knda"
+    numbering_systems: ["latn", "knda"]
+    date_order: "DMY"
+    currency: "INR"
+
+  ml:
+    name: "Malayalam"
+    script: "Mlym"
+    numbering_systems: ["latn", "mlym"]
+    date_order: "DMY"
+    currency: "INR"
+
+  gu:
+    name: "Gujarati"
+    script: "Gujr"
+    numbering_systems: ["latn", "gujr"]
+    date_order: "DMY"
+    currency: "INR"
+    currency_cues:
+      accept: ["રૂપિયા", "રૂપિયો", "રૂ", "₹", "Rs", "Rs.", "INR"]
+      canonical: "₹"
+      paise_accept: ["પૈસા", "પૈસો"]
+
+  pa:
+    name: "Punjabi"
+    script: "Guru"
+    numbering_systems: ["latn", "guru"]
+    date_order: "DMY"
+    currency: "INR"
+    # The bindi-folding pass in unicode_clean.working_copy means the
+    # money grammar sees the non-bindi forms regardless of which
+    # variant the ASR emitted. The accept list below is the
+    # POST-FOLDING vocabulary; do not add ਰੁਪਏ here — it is folded
+    # to ਰੁਪਏ already (no bindi in this word). The list will need a
+    # second pass when the bn-style regional split is added for pa
+    # (Indian vs Pakistani Punjabi). Not in scope this stage.
+    currency_cues:
+      accept: ["ਰੁਪਏ", "ਰੁਪਇਆ", "ਰੁ", "₹", "Rs", "Rs.", "INR"]
+      canonical: "₹"
+      paise_accept: ["ਪੈਸੇ", "ਪੈਸਾ"]
+
+  ur:
+    name: "Urdu"
+    script: "Arab"
+    numbering_systems: ["latn", "arabext"]
+    date_order: "DMY"
+    currency: "INR"
+    bidi: true                # right-to-left UI; do not inject bidi controls into stored text
+
+# Per-tenant overrides. The ITN runtime resolves a tenant policy by
+# tenant id; a missing id falls back to `defaults.tenant` (== "default").
+# Add new tenants here rather than threading policy through code.
+tenants:
+  # Default tenant: India, day-first.
+  default:
+    region: "IN"
+    date_order: "DMY"
+    currency: "INR"
+
+  # Concrete tenants below illustrate how regional policy is set.
+  # The names are placeholders; add real tenants and rename as needed.
+  acme_in:
+    region: "IN"
+    date_order: "DMY"
+    currency: "INR"
+
+  acme_us:
+    region: "US"
+    date_order: "MDY"
+    currency: "USD"
+
+  acme_iso:
+    region: "ZZ"
+    date_order: "YMD"
+    currency: "USD"

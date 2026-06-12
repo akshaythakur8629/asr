@@ -1,0 +1,17 @@
+.venv/
+.venv*/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.github/
+.pytest_cache/
+.benchmarks/
+.ruff_cache/
+.vscode/
+.idea/
+tmp/
+recording/
+*.log

@@ -1,0 +1,93 @@
+
+aadhaar card_aadhar card_आधार कार्ड
+
+
+
+balance due_बैलेंस ड्यू_देय बैलेंस
+bank account_bankaccount_बैंक अकाउंट_बैंक खाता
+bank balance_account balance_बैंक बैलेंस_खाता बैलेंस
+bank details_account details_बैंक डिटेल्स_अकाउंट डिटेल्स
+bank name_बैंक नेम_बैंक का नाम
+
+
+bank branch_बैंक ब्रांच_बैंक शाखा
+
+cibil report_credit report_सिबिल रिपोर्ट_क्रेडिट रिपोर्ट
+cibil score_cibilscore_सिबिल स्कोर
+
+
+cred resolve_credresolve_क्रेड रिजॉल्व_क्रेडरिजॉल्व
+
+current account_करंट अकाउंट_चालू खाता
+
+
+
+due amount_amount due_ड्यू अमाउंट_देय राशि
+
+
+
+emi_e m i_ईएमआई_इएमआई
+emi amount_emi amt_ईएमआई अमाउंट_किस्त राशि
+
+
+foreclosure_preclosure_pre closure_फोरक्लोजर_प्रीक्लोजर_प्री क्लोजर
+foreclosure charges_preclosure charges_फोरक्लोजर चार्जेस_प्रीक्लोजर चार्जेस
+
+google pay_googlepay_gpay_गूगल पे_गूगलपे_जीपे
+
+
+kyc_k y c_केवाईसी_के वाई सी_केवायसी
+
+
+late payment_लेट पेमेंट_विलंबित भुगतान
+legal notice_लीगल नोटिस_कानूनी नोटिस
+
+loan account_लोन अकाउंट_ऋण खाता
+loan account number_loan account no_lan_लोन अकाउंट नंबर_एलएएन_एल ए एन
+
+loan amount_loan amt_लोन अमाउंट_ऋण राशि
+
+
+
+
+
+
+
+missed emi_emi missed_मिस्ड ईएमआई_ईएमआई मिस
+
+moneyview_money view_मनीव्यू_मनी व्यू
+
+
+noc_n o c_no objection certificate_एनओसी_एन ओ सी_नो ऑब्जेक्शन सर्टिफिकेट
+
+
+outstanding amount_outstanding balance_आउटस्टैंडिंग अमाउंट_बकाया राशि
+overdue amount_overdue amt_ओवरड्यू अमाउंट_अतिदेय राशि
+overdue payment_ओवरड्यू पेमेंट_अतिदेय भुगतान
+pan_p a n_पैन_पी ए एन
+
+
+
+pay now_paynow_पे नाउ_पेमेंट नाउ
+payment link_pay link_पेमेंट लिंक_भुगतान लिंक
+
+paytm_pay tm_पेटीएम_पेटी एम
+
+phonepe_phone pe_phone pay_फोनपे_फोन पे
+
+
+principal amount_principal outstanding_प्रिंसिपल अमाउंट_मूलधन राशि
+
+recovery agent_recovery executive_रिकवरी एजेंट_वसूली एजेंट
+reference number_ref number_रेफरेंस नंबर_संदर्भ संख्या
+registered mobile number_registered number_रजिस्टर्ड मोबाइल नंबर_रजिस्टर्ड नंबर
+loan repayment_रीपेमेंट_लोन रीपेमेंट_चुकौती
+
+
+settlement amount_सेटलमेंट अमाउंट_निपटान राशि
+
+smfg_s m f g_एसएमएफजी_एस एम एफ जी
+smfg india credit_smfgindiacredit_एसएमएफजी इंडिया क्रेडिट_एस एम एफ जी इंडिया क्रेडिट
+ugro capital_u gro capital_u grow capital_ugro captial_यू ग्रो कैपिटल_यूग्रो कैपिटल_उग्रो कैपिटल
+kreditbee_kredit bee_creditbee_credit bee_क्रेडिटबी_क्रेडिट बी
+bajaj_bajaj finance_बजाज_बाजाज_बजाज फाइनेंस_बाजाज फाइनेंस

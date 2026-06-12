@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sarga — Indian Language ASR by CredResolve</title>
+  <!-- Modern Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400..900;1,400..900&family=Plus+Jakarta+Sans:ital,wght@0,200..800;1,200..800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <!-- Three-Column Layout Container -->
+  <div class="app-container">
+    
+    <!-- 1. Left Sidebar -->
+    <aside class="sidebar">
+      <div class="branding">
+        <div class="logo">Sarga <span class="logo-accent">सर्ग</span></div>
+        <div class="tagline">Indian Language ASR by CredResolve</div>
+      </div>
+
+      <div class="system-status">
+        <span class="status-dot"></span>
+        <span id="status-text">Standby</span>
+      </div>
+
+      <!-- Mode Selection Tabs -->
+      <div class="mode-tabs">
+        <button id="tab-realtime" class="tab-btn active">Real-time</button>
+        <button id="tab-batch" class="tab-btn">Batch File</button>
+        <button id="tab-eval" class="tab-btn">Evaluation Run</button>
+      </div>
+
+      <!-- Settings Panel -->
+      <div class="settings-card">
+        <div class="card-title">ASR Settings</div>
+        
+        <div class="control-group">
+          <label for="language">Transcription Language</label>
+          <select id="language">
+            <option value="hi-IN">Hindi (hi-IN)</option>
+            <option value="auto">Automatic Detection</option>
+            <option value="en-US">English (en-US)</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <label for="denoise">Audio Denoising</label>
+          <select id="denoise">
+            <option value="true">DeepFilterNet (Enabled)</option>
+            <option value="false">Disabled</option>
+          </select>
+        </div>
+
+        <!-- Hidden inputs to match JS code selectors for websocket/batch logic -->
+        <select id="stream-mode" class="hidden-select">
+          <option value="websocket" selected>Real-time WebSocket</option>
+          <option value="batch">Batch / Upload</option>
+        </select>
+
+        <!-- Advanced ASR configurations in collapsible card to avoid clutter -->
+        <details class="advanced-settings">
+          <summary>Advanced Options</summary>
+          <div class="details-content">
+            <div class="control-group">
+              <label for="vad">Voice Activity Detection</label>
+              <select id="vad">
+                <option value="true">Silero VAD (Enabled)</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+            
+            <div class="control-group">
+              <label for="itn">ITN / Normalization</label>
+              <select id="itn">
+                <option value="custom" selected>Custom Rule ITN</option>
+                <option value="nemo">NeMo Standard ITN</option>
+                <option value="compare">Compare (Custom &amp; NeMo)</option>
+              </select>
+            </div>
+
+            <div class="control-group">
+              <label for="chunk">Streaming Chunk Size</label>
+              <select id="chunk">
+                <option value="1120" selected>1120 ms (Default)</option>
+                <option value="560">560 ms (Medium Latency)</option>
+                <option value="320">320 ms (Low Latency)</option>
+                <option value="160">160 ms</option>
+                <option value="80">80 ms (Ultra Low)</option>
+              </select>
+            </div>
+          </div>
+        </details>
+
+        <!-- Biasing context settings (collapsible) -->
+        <details class="biasing-settings">
+          <summary>Call Context Biasing</summary>
+          <div class="details-content">
+            <div class="control-group">
+              <label for="bias-name">Customer Name</label>
+              <input id="bias-name" type="text" placeholder="e.g. Ramesh Kumar" autocomplete="off">
+            </div>
+            <div class="control-group">
+              <label for="bias-institute">Institute Name</label>
+              <input id="bias-institute" type="text" placeholder="e.g. CREDIT RESOLVE" autocomplete="off">
+            </div>
+            <div class="control-group">
+              <label for="bias-amount">Total Due Amount</label>
+              <input id="bias-amount" type="text" placeholder="e.g. 25450" autocomplete="off">
+            </div>
+            <div class="control-group">
+              <label for="bias-date">Due Date</label>
+              <input id="bias-date" type="text" placeholder="YYYY-MM-DD" autocomplete="off">
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <!-- Action Panel for buttons (Dynamically switches state/accents based on mode) -->
+      <div class="action-card">
+        <div id="realtime-actions" class="actions-panel">
+          <button id="record" class="btn btn-primary btn-salmon">
+            <span class="btn-icon">🎙️</span> Start Stream
+          </button>
+          <button id="stop" class="btn btn-secondary" disabled>
+            Mute / Stop
+          </button>
+        </div>
+        
+        <div id="batch-actions" class="actions-panel hidden">
+          <label class="btn btn-primary btn-violet upload-label">
+            <span class="btn-icon">📁</span> Select File
+            <input id="file" type="file" accept="audio/*">
+          </label>
+        </div>
+      </div>
+
+      <!-- Session History Panel -->
+      <div class="sessions-card hidden" id="sessions-card">
+        <div class="sessions-header">
+          <div class="card-title">Sessions</div>
+          <button id="new-session-btn" class="new-session-btn">+ New</button>
+        </div>
+        <div class="session-list">
+          <div id="samples" class="samples-list">
+            <!-- Audio samples listed here -->
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 2. Center Console -->
+    <main class="center-console">
+      <header class="console-header">
+        <div class="header-left">
+          <span class="badge" id="mode-badge">Real-time Streaming</span>
+          <h2 id="session-title">ASR Transcript Console</h2>
+        </div>
+        <button id="diagnostics-toggle-btn" class="toggle-btn">Diagnostics</button>
+      </header>
+
+      <!-- Onboarding/Standby Panel -->
+      <section id="onboarding-panel" class="console-panel onboarding">
+        <div class="onboarding-graphic">🎙️</div>
+        <h3>Ready for Transcription</h3>
+        <p class="onboarding-desc">Select your language, click "Start Stream" in the left sidebar, and speak into your microphone to begin real-time transcription.</p>
+        
+        <div class="capability-pills">
+          <span class="pill">VAD SEGMENTED</span>
+          <span class="pill">16KHZ PCM</span>
+          <span class="pill">MULTI-LANGUAGE</span>
+          <span class="pill">REAL-TIME</span>
+        </div>
+      </section>
+
+      <!-- Processing/Status Panel -->
+      <section id="status" class="console-panel hidden">
+        <div class="statusline">
+          <span class="status-stage">Status: <strong id="stage">Queued</strong></span>
+          <span id="percent" class="status-percent">0%</span>
+        </div>
+        <div class="progress-bar-container">
+          <progress id="progress" max="100" value="0"></progress>
+        </div>
+        <pre id="error" class="error-pre"></pre>
+      </section>
+
+      <!-- Transcripts/Results Panel -->
+      <section id="result" class="console-panel results-panel hidden">
+        <div class="audio-players hidden" id="audio-players-container">
+          <div class="audio-player-group">
+            <label>Original Audio</label>
+            <audio id="original" controls></audio>
+          </div>
+          <div class="audio-player-group">
+            <label>Denoised Audio</label>
+            <audio id="denoised" controls></audio>
+          </div>
+        </div>
+
+        <div class="transcript-chat">
+          <div id="turns" class="dialogue-container">
+            <!-- Transcript bubbles will render here -->
+          </div>
+        </div>
+      </section>
+
+      <!-- Model Evaluation Panel -->
+      <section id="eval" class="console-panel evaluation-panel hidden">
+        <div class="eval-header-block">
+          <div>
+            <span class="badge badge-indigo">Evaluation Run</span>
+            <h3>Hindi Context Biasing Comparison</h3>
+          </div>
+          <div class="eval-controls">
+            <select id="eval-filter">
+              <option value="all">All Rows</option>
+              <option value="improved">Recall Improved</option>
+              <option value="missed">Recall Missed</option>
+              <option value="applied">Biasing Applied</option>
+            </select>
+            <button id="eval-refresh" class="btn-refresh">Refresh</button>
+          </div>
+        </div>
+
+        <div id="eval-summary" class="eval-metrics-row">
+          <!-- Summary statistics render here -->
+        </div>
+
+        <div class="eval-body">
+          <div id="eval-rows" class="eval-list">
+            <!-- List of evaluation rows -->
+          </div>
+          <div id="eval-detail" class="eval-detail-view">
+            <p class="empty-detail-prompt">Select an evaluation row on the left to compare baseline and context biased transcripts.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- 3. Right Diagnostics Panel -->
+    <aside id="diagnostics-panel" class="right-panel collapsed">
+      <div class="panel-header">
+        <h3>Live Diagnostics</h3>
+      </div>
+      
+      <div class="diagnostics-content">
+        <div class="metric-card">
+          <span class="metric-label">Duration</span>
+          <strong id="diag-duration" class="metric-value">0.0s</strong>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">Processed Chunks</span>
+          <strong id="diag-chunks" class="metric-value">0</strong>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">Inference Latency</span>
+          <strong id="diag-latency" class="metric-value">--ms</strong>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">Detected Language</span>
+          <strong id="diag-language" class="metric-value">--</strong>
+        </div>
+
+        <!-- Pipeline Health Status Card -->
+        <div class="pipeline-health-card">
+          <div class="health-header">
+            <span class="health-dot health-online"></span>
+            <h4>Pipeline Health</h4>
+          </div>
+          <div class="health-details">
+            <div class="health-row"><span>ASR Model</span><strong>Nemotron-3.5</strong></div>
+            <div class="health-row"><span>GPU 0 ASR</span><strong class="text-green">Online</strong></div>
+            <div class="health-row"><span>GPU 1 Diarizer</span><strong class="text-green">Online</strong></div>
+            <div class="health-row"><span>Audio Codec</span><strong>PCM 16-bit</strong></div>
+            <div class="health-row"><span>Sample Rate</span><strong>16,000 Hz</strong></div>
+            <div class="health-row"><span>VAD Engine</span><strong>Silero v5</strong></div>
+          </div>
+        </div>
+
+        <div class="diagnostics-metrics" id="metrics">
+          <!-- Legacy metrics map here if any -->
+        </div>
+      </div>
+    </aside>
+
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
