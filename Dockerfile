@@ -41,4 +41,4 @@ ENV ASR_MAX_BATCH_SIZE=16
 ENV ASR_BATCH_TIMEOUT_SEC=0.05
 
 # Start the application
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "error"]

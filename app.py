@@ -1,4 +1,14 @@
 from __future__ import annotations
+import os
+import logging
+import warnings
+os.environ["TQDM_DISABLE"] = "1"
+warnings.filterwarnings("ignore")
+logging.basicConfig(level=logging.ERROR)
+logging.getLogger().setLevel(logging.ERROR)
+for logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "nemo", "NeMo"]:
+    logging.getLogger(logger_name).setLevel(logging.ERROR)
+
 import csv, io, re, shutil, sys, tempfile
 from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -13,6 +23,11 @@ csv.field_size_limit(sys.maxsize)  # transcript columns hold raw beam-search dum
 
 @app.on_event("startup")
 def startup_event():
+    try:
+        from nemo.utils import logging as nemo_logging
+        nemo_logging.setLevel(nemo_logging.logging.ERROR)
+    except Exception:
+        pass
     print("Pre-loading models on startup...")
     store._ensure_models()
     print("Models pre-loaded successfully!")
@@ -132,8 +147,14 @@ async def websocket_stream(
     vad: str = "true",
     diarize: str = "false",
     input_rate: int = 16000,
-    chunk_ms: int = 320
+    chunk_ms: int = 320,
+    call_code: str = None,
+    flush_signal: str = "false"
 ):
+    if not call_code:
+        call_code = websocket.query_params.get("call_code") or websocket.query_params.get("call-code")
+    if not flush_signal or flush_signal == "false":
+        flush_signal = websocket.query_params.get("flush_signal") or "false"
     await handle_websocket_stream(
         websocket=websocket,
         store=store,
@@ -142,7 +163,47 @@ async def websocket_stream(
         vad=vad,
         diarize=diarize,
         input_rate=input_rate,
-        chunk_ms=chunk_ms
+        chunk_ms=chunk_ms,
+        call_code=call_code,
+        flush_signal=flush_signal
+    )
+
+@app.websocket("/ws/stt")
+async def ws_stt(
+    websocket: WebSocket,
+):
+    # Extract query parameters to match production gateway URL style
+    lang_code = websocket.query_params.get("language-code") or "hi-IN"
+    if lang_code == "hi":
+        language = "hi-IN"
+    elif lang_code == "en":
+        language = "en-US"
+    else:
+        language = lang_code
+        
+    sample_rate_str = websocket.query_params.get("sample_rate") or "16000"
+    input_rate = int(sample_rate_str) if sample_rate_str.isdigit() else 16000
+    
+    call_code = websocket.query_params.get("call_code") or websocket.query_params.get("call-code")
+    
+    # Force vad to be false for this endpoint as requested
+    vad = "false"
+    
+    # Map flush_signal query parameter (defaults to "false")
+    flush_signal = websocket.query_params.get("flush_signal") or "false"
+    
+    # Run in Immediate Mode (chunk_ms=0, denoise=true)
+    await handle_websocket_stream(
+        websocket=websocket,
+        store=store,
+        language=language,
+        denoise="true",
+        vad=vad,
+        diarize="false",
+        input_rate=input_rate,
+        chunk_ms=0,
+        call_code=call_code,
+        flush_signal=flush_signal
     )
 
 
