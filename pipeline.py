@@ -1,25 +1,71 @@
 """Single-worker temporary processing pipeline."""
 from __future__ import annotations
+import os
 import shutil, threading, time, traceback, uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from audio_processing import AudioPreprocessor, normalize_audio, probe_channel_count, slice_wav, split_channels, wav_duration
-from diarize_inventory import NemoTelephonyDiarizer
-from nemotron_streaming import NemotronStreamingASR
 from transcript_render import render_markdown_transcript
+
+DEPLOY_NEMOTRON = os.environ.get("DEPLOY_NEMOTRON", "true").lower() == "true"
+DEPLOY_INDIC = os.environ.get("DEPLOY_INDIC", "false").lower() == "true"
+
+def resolve_model(requested_model: str) -> str:
+    """Resolve the model name based on deployment environment variables."""
+    # If both models are deployed (e.g. port 8001)
+    if DEPLOY_NEMOTRON and DEPLOY_INDIC:
+        if requested_model in {"credresolve:v1", "sarga:v1.1"}:
+            return "credresolve:v1"
+        return "sarga:v1"
+    # If only Nemotron is deployed (e.g. port 8000)
+    elif DEPLOY_NEMOTRON:
+        return "sarga:v1"
+    # If only Indic Conformer is deployed (e.g. port 8002)
+    elif DEPLOY_INDIC:
+        return "credresolve:v1"
+    return "sarga:v1"
+
+NemoTelephonyDiarizer = None
+NemotronStreamingASR = None
+SpeakerTurn = None
+
+if DEPLOY_NEMOTRON:
+    try:
+        from diarize_inventory import NemoTelephonyDiarizer, SpeakerTurn
+        from nemotron_streaming import NemotronStreamingASR
+    except ImportError as e:
+        print(f"Warning: Failed to import NeMo dependencies: {e}")
+
+if SpeakerTurn is None:
+    class SpeakerTurn:
+        def __init__(self, speaker, start_sec, end_sec, overlap_flag=False, channel=None):
+            self.speaker = speaker
+            self.start_sec = start_sec
+            self.end_sec = end_sec
+            self.overlap_flag = overlap_flag
+            self.channel = channel
+
+IndicStreamingASR = None
+if DEPLOY_INDIC:
+    try:
+        from indic_model.model import IndicStreamingASR
+    except ImportError as e:
+        print(f"Warning: Failed to import Indic model dependencies: {e}")
+
 
 class JobStore:
     def __init__(self, root=Path("/tmp/nemotron-test"), ttl_seconds=3600):
         self.root=Path(root); self.root.mkdir(parents=True,exist_ok=True); self.ttl=ttl_seconds
         self.jobs:dict[str,dict[str,Any]]={}; self.lock=threading.Lock(); self.executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix="nemotron-job")
-        self.preprocessor=None; self.diarizer=None; self.asr=None
-    def submit(self, source:Path, filename:str, language="hi-IN", chunk_ms=1120, itn_backend="custom", biasing_context=None)->dict:
+        self.preprocessor=None; self.diarizer=None; self.asr=None; self.asr_indic=None
+    def submit(self, source:Path, filename:str, language="hi-IN", chunk_ms=1120, itn_backend="custom", biasing_context=None, model="sarga:v1")->dict:
+        model = resolve_model(model)
         job_id=uuid.uuid4().hex; job_dir=self.root/job_id; job_dir.mkdir(parents=True)
         suffix=Path(filename).suffix or ".webm"; saved=job_dir/f"input{suffix}"; shutil.copyfile(source,saved)
-        job={"id":job_id,"status":"queued","stage":"queued","progress":0,"filename":filename,"language":language,"chunk_ms":chunk_ms,"itn_backend":itn_backend,"biasing_context":biasing_context,"created_at":time.time(),"result":None,"error":None}
+        job={"id":job_id,"status":"queued","stage":"queued","progress":0,"filename":filename,"language":language,"chunk_ms":chunk_ms,"itn_backend":itn_backend,"biasing_context":biasing_context,"model":model,"created_at":time.time(),"result":None,"error":None}
         with self.lock:self.jobs[job_id]=job
-        self.executor.submit(self._run,job_id,saved,language,chunk_ms,itn_backend,biasing_context); return self.public(job_id)
+        self.executor.submit(self._run,job_id,saved,language,chunk_ms,itn_backend,biasing_context,model); return self.public(job_id)
     def update(self,job_id,**changes):
         with self.lock:self.jobs[job_id].update(changes)
     def public(self,job_id):
@@ -28,36 +74,64 @@ class JobStore:
             job=self.jobs.get(job_id)
             return dict(job) if job else None
     def _ensure_models(self):
-        if self.preprocessor is None:self.preprocessor=AudioPreprocessor()
-        if self.diarizer is None:self.diarizer=NemoTelephonyDiarizer(device="cuda:1",max_speakers=2)
-        if self.asr is None:self.asr=NemotronStreamingASR(device="cuda:0")
-    def _run(self,job_id,source,language,chunk_ms,itn_backend,biasing_context=None):
+        if self.preprocessor is None:
+            self.preprocessor=AudioPreprocessor()
+        if DEPLOY_NEMOTRON:
+            if self.diarizer is None and NemoTelephonyDiarizer is not None:
+                self.diarizer=NemoTelephonyDiarizer(device="cuda:1",max_speakers=2)
+            if self.asr is None and NemotronStreamingASR is not None:
+                self.asr=NemotronStreamingASR(device="cuda:0")
+        if DEPLOY_INDIC:
+            if self.asr_indic is None and IndicStreamingASR is not None:
+                self.asr_indic=IndicStreamingASR(device="cuda:0")
+    def _run(self,job_id,source,language,chunk_ms,itn_backend,biasing_context=None,model="sarga:v1"):
         job_dir=self.root/job_id; metrics={}; started=time.perf_counter(); biasing_applied=False
         try:
             self.update(job_id,status="running",stage="normalizing",progress=5); t=time.perf_counter()
             normalized=normalize_audio(source,job_dir/"normalized.wav"); metrics["normalize_seconds"]=round(time.perf_counter()-t,3)
             self.update(job_id,stage="loading_models",progress=15); self._ensure_models()
-            metrics["biasing"]=self._configure_biasing(language,biasing_context,job_dir)
-            biasing_applied=bool(metrics["biasing"] and metrics["biasing"].get("applied"))
+            
+            if model == "sarga:v1":
+                metrics["biasing"]=self._configure_biasing(language,biasing_context,job_dir)
+                biasing_applied=bool(metrics["biasing"] and metrics["biasing"].get("applied"))
+            else:
+                metrics["biasing"]={"applied":False,"reason":"model_not_nemotron"}
+                
             self.update(job_id,stage="denoising",progress=25); t=time.perf_counter(); denoised=self.preprocessor.denoise_wav(normalized,job_dir/"denoised.wav"); metrics["denoise_seconds"]=round(time.perf_counter()-t,3)
             channel_count=probe_channel_count(source); channel_clips={}
+            
             self.update(job_id,stage="diarizing",progress=45); t=time.perf_counter()
-            if channel_count>=2:
-                channels=split_channels(source,job_dir/"channels")
-                channel_clips={index:self.preprocessor.denoise_wav(path,job_dir/f"channel_{index}_denoised.wav") for index,path in enumerate(channels)}
-                turns=self.diarizer.diarize_channels(channels,job_dir/"diarization"); metrics["diarization_mode"]="per_channel"; metrics["channels"]=channel_count
+            turns = None
+            if self.diarizer is not None:
+                if channel_count>=2:
+                    channels=split_channels(source,job_dir/"channels")
+                    channel_clips={index:self.preprocessor.denoise_wav(path,job_dir/f"channel_{index}_denoised.wav") for index,path in enumerate(channels)}
+                    turns=self.diarizer.diarize_channels(channels,job_dir/"diarization"); metrics["diarization_mode"]="per_channel"; metrics["channels"]=channel_count
+                else:
+                    turns=self.diarizer.diarize(normalized,job_dir/"diarization"); metrics["diarization_mode"]="clustering"
+                metrics["diarization_seconds"]=round(time.perf_counter()-t,3)
             else:
-                turns=self.diarizer.diarize(normalized,job_dir/"diarization"); metrics["diarization_mode"]="clustering"
-            metrics["diarization_seconds"]=round(time.perf_counter()-t,3)
+                metrics["diarization_seconds"]=0.0
+                metrics["diarization_mode"]="none"
+                
             if not turns:
-                from diarize_inventory import SpeakerTurn
                 turns=[SpeakerTurn("speaker_0",0.0,wav_duration(normalized),False)]
+                
             results=[]; asr_started=time.perf_counter()
             for index,turn in enumerate(turns):
                 self.update(job_id,stage=f"transcribing turn {index+1}/{len(turns)}",progress=55+int(40*(index/max(1,len(turns)))))
                 clip_source=channel_clips.get(turn.channel,denoised) if turn.channel is not None else denoised
                 clip=slice_wav(clip_source,job_dir/f"turn_{index:04d}.wav",turn.start_sec,turn.end_sec)
-                text=self.asr.transcribe(clip,language=language,chunk_ms=chunk_ms)
+                
+                if model in {"sarga:v1.1", "credresolve:v1"}:
+                    if self.asr_indic is None:
+                        raise RuntimeError(f"Model {model} (Indic Conformer) is not deployed on this server.")
+                    text=self.asr_indic.transcribe(clip,language=language,chunk_ms=chunk_ms)
+                else:
+                    if self.asr is None:
+                        raise RuntimeError(f"Model {model} (Nemotron) is not deployed on this server.")
+                    text=self.asr.transcribe(clip,language=language,chunk_ms=chunk_ms)
+                    
                 if text.strip():
                     normalized_turn=_normalize_turn(text,language,itn_backend)
                     results.append({"speaker":turn.speaker,"start_sec":round(turn.start_sec,3),"end_sec":round(turn.end_sec,3),"overlap_flag":turn.overlap_flag,"text":text,**normalized_turn})

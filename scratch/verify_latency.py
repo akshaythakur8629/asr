@@ -20,14 +20,14 @@ async def main():
     # 1. Normalize/resample MP3 to WAV inside the container
     print("Resampling sample MP3 to 16kHz mono WAV inside the container...")
     subprocess.run([
-        "docker", "exec", "sarga-app", "ffmpeg", "-y", "-v", "error",
+        "docker", "exec", "sarga-nemo", "ffmpeg", "-y", "-v", "error",
         "-i", MP3_SOURCE, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", WAV_PATH
     ], check=True)
     
     # Copy WAV from container to host to read it
     print("Copying WAV from container to host...")
     subprocess.run([
-        "docker", "cp", f"sarga-app:{WAV_PATH}", "/tmp/verify_host.wav"
+        "docker", "cp", f"sarga-nemo:{WAV_PATH}", "/tmp/verify_host.wav"
     ], check=True)
     
     # 2. Read the audio frames
@@ -94,7 +94,7 @@ async def main():
             await ws.send(chunk)
             
         # Keep connection open briefly to get final responses
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(10.0)
         await ws.close()
         await recv_task
         

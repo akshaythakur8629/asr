@@ -1,0 +1,11 @@
+FROM sarga-nemo:latest
+
+# Set deployment flags to enable both models
+ENV DEPLOY_NEMOTRON=true
+ENV DEPLOY_INDIC=true
+
+# Install Indic dependencies on top of the NeMo base image
+RUN pip install --no-cache-dir "onnxruntime-gpu>=1.17,<2" "speechbrain>=0.5.16,<2" "transformers>=4.41,<5" "huggingface_hub>=0.24,<1"
+
+# Expose port 8000 (uvicorn listens on 8000 internally)
+EXPOSE 8000

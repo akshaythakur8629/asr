@@ -48,6 +48,14 @@
         </div>
 
         <div class="control-group">
+          <label for="model">Inference Model</label>
+          <select id="model">
+            <option value="sarga:v1" selected>Nemotron (sarga:v1)</option>
+            <option value="credresolve:v1">Indic Conformer (credresolve:v1)</option>
+          </select>
+        </div>
+
+        <div class="control-group">
           <label for="denoise">Audio Denoising</label>
           <select id="denoise">
             <option value="true">DeepFilterNet (Enabled)</option>
@@ -126,8 +134,11 @@
           <button id="record" class="btn btn-primary btn-salmon">
             <span class="btn-icon">🎙️</span> Start Stream
           </button>
+          <button id="mute" class="btn btn-secondary" disabled>
+            Mute
+          </button>
           <button id="stop" class="btn btn-secondary" disabled>
-            Mute / Stop
+            Stop Stream
           </button>
         </div>
         

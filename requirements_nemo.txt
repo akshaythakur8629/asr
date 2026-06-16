@@ -23,8 +23,5 @@ packaging>=23,<24
 # NVIDIA NeMo ASR + diarization. Pin the reference API used by nemotron_streaming.py.
 nemo_toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/NeMo.git@b7e09985039ada42f40c5f796ef22c711c283c90
 
-# Indic model dependencies
-onnxruntime-gpu>=1.17,<2
-speechbrain>=0.5.16,<2
+# Metrics
 prometheus-client>=0.20,<1
-

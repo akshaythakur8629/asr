@@ -7,6 +7,7 @@ let audioStream = null;
 let liveInterval = null;
 let liveChunkCount = 0;
 let liveStartTime = 0;
+let isMuted = false;
 
 // Setup Tab Navigation
 $('tab-realtime').onclick = () => {
@@ -97,6 +98,7 @@ async function startWebSocketStream() {
   const language = $('language').value;
   const denoise = $('denoise').value;
   const vad = $('vad').value;
+  const model = $('model').value;
   
   // Clear previous results and show status
   $('onboarding-panel').classList.add('hidden');
@@ -138,7 +140,7 @@ async function startWebSocketStream() {
 
   const loc = window.location;
   const wsProtocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${wsProtocol}//${loc.host}/api/stream?language=${language}&denoise=${denoise}&vad=${vad}&chunk_ms=${chunkMs}`;
+  const wsUrl = `${wsProtocol}//${loc.host}/ws/stt?language-code=${language}&model=${encodeURIComponent(model)}&mode=transcribe&sample_rate=16000&vad_signals=true&flush_signal=false&input_audio_codec=pcm_s16le&binary_audio=1&call_code=frontend-session-${Date.now()}`;
   
   ws = new WebSocket(wsUrl);
   
@@ -288,6 +290,9 @@ function stopWebSocketStream() {
     ws = null;
   }
   stopAudioCapture();
+  isMuted = false;
+  $('mute').disabled = true;
+  $('mute').textContent = 'Mute';
 }
 
 $('record').onclick = async () => {
@@ -296,8 +301,12 @@ $('record').onclick = async () => {
   $('stop').disabled = false;
   
   if (mode === 'websocket') {
+    $('mute').disabled = false;
+    isMuted = false;
+    $('mute').textContent = 'Mute';
     await startWebSocketStream();
   } else {
+    $('mute').disabled = true;
     // Original Batch MediaRecorder Mode
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     chunks = [];
@@ -311,11 +320,25 @@ $('stop').onclick = () => {
   const mode = $('stream-mode').value;
   $('record').disabled = false;
   $('stop').disabled = true;
+  $('mute').disabled = true;
   
   if (mode === 'websocket') {
     stopWebSocketStream();
   } else if (recorder) {
     recorder.stop();
+  }
+};
+
+$('mute').onclick = () => {
+  if (!audioStream) return;
+  isMuted = !isMuted;
+  audioStream.getAudioTracks().forEach(track => {
+    track.enabled = !isMuted;
+  });
+  if (isMuted) {
+    $('mute').textContent = '🔇 Unmute';
+  } else {
+    $('mute').textContent = 'Mute';
   }
 };
 
@@ -334,6 +357,7 @@ function options(fd) {
   fd.append('language', $('language').value);
   fd.append('chunk_ms', $('chunk').value);
   fd.append('itn_backend', $('itn').value);
+  fd.append('model', $('model').value);
   [['name', 'bias-name'], ['institute_name', 'bias-institute'], ['total_due', 'bias-amount'], ['due_date', 'bias-date']].forEach(([field, id]) => {
     const v = $(id).value.trim();
     if (v) fd.append(field, v);

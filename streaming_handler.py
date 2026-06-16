@@ -5,11 +5,13 @@ import uuid
 import asyncio
 import time
 import json
+import base64
 from datetime import datetime
 from pathlib import Path
 from fastapi import WebSocket, WebSocketDisconnect
 from audio_processing import write_pcm16_wav, slice_wav, normalize_audio
 from silero_vad import get_speech_timestamps, read_audio
+from pipeline import resolve_model
 
 # Setup a clean logger that writes ONLY request and response events to app.log
 req_res_logger = logging.getLogger("req_res_logger")
@@ -46,13 +48,21 @@ async def handle_websocket_stream(
     input_rate: int = 16000,
     chunk_ms: int = 160,
     call_code: str = None,
-    flush_signal: str = "false"
+    flush_signal: str = "false",
+    model: str = "sarga:v1"
 ):
     await websocket.accept()
+    model = resolve_model(model)
     
     session_id = call_code if call_code else uuid.uuid4().hex
+    
+    async def send_json_logged(payload: dict):
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        log_event(f"[{now_str}] [WS] [RES] [Session: {session_id}] Sending: {json.dumps(payload, ensure_ascii=False)}")
+        await websocket.send_json(payload)
+
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-    log_event(f"[{now_str}] [WS] [OPEN] Session {session_id} connected. chunk_ms={chunk_ms}, language={language}, denoise={denoise}, vad={vad}")
+    log_event(f"[{now_str}] [WS] [OPEN] Session {session_id} connected. chunk_ms={chunk_ms}, language={language}, denoise={denoise}, vad={vad}, flush_signal={flush_signal}, model={model}")
     session_dir = store.root / f"stream_{session_id}"
     session_dir.mkdir(parents=True, exist_ok=True)
     
@@ -63,11 +73,27 @@ async def handle_websocket_stream(
     
     # Pre-load/ensure models
     store._ensure_models()
+
+    if model == "credresolve:v1" and store.asr_indic is None:
+        log_event(f"[{now_str}] [WS] [CLOSE] Session {session_id} rejected. Model {model} (Indic) not deployed.")
+        await websocket.close(code=4000, reason=f"Model {model} not deployed")
+        return
+    elif model == "sarga:v1" and store.asr is None:
+        log_event(f"[{now_str}] [WS] [CLOSE] Session {session_id} rejected. Model sarga:v1 (Nemotron) not deployed.")
+        await websocket.close(code=4000, reason="Model sarga:v1 not deployed")
+        return
+
+    def get_asr_worker():
+        if model == "credresolve:v1":
+            return store.asr_indic
+        return store.asr
     
     # Store audio as raw bytearray of 16-bit mono 16kHz PCM
     audio_buffer = bytearray()
+    flush_requested = False
     
     async def receive_loop():
+        nonlocal last_data_time, flush_requested, last_processed_len, input_rate, model
         try:
             while True:
                 msg = await websocket.receive()
@@ -75,20 +101,59 @@ async def handle_websocket_stream(
                     break
                 if "bytes" in msg and msg["bytes"]:
                     audio_buffer.extend(msg["bytes"])
+                    last_data_time = time.time()
                 elif "text" in msg and msg["text"]:
                     try:
+                        # Log text message structure to diagnose telco payload format
                         data = json.loads(msg["text"])
-                        if data.get("type") == "start":
-                            call_id = data.get("call_id")
-                            audio_buffer.clear()
-                            nonlocal last_processed_len
-                            last_processed_len = 0
-                            await websocket.send_json({"type": "ready", "call_id": call_id})
-                        elif data.get("type") == "stop":
-                            await websocket.send_json({"type": "done"})
-                            break
+                        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                        if isinstance(data, dict):
+                            msg_type = data.get("type")
+                            log_data = data.copy()
+                            if "audio" in log_data and isinstance(log_data["audio"], dict):
+                                audio_copy = log_data["audio"].copy()
+                                if "data" in audio_copy:
+                                    audio_copy["data"] = f"<base64: {len(audio_copy['data'])} chars>"
+                                log_data["audio"] = audio_copy
+                            log_event(f"[{now_str}] [WS] [REQ] [Session: {session_id}] Received: {json.dumps(log_data, ensure_ascii=False)}")
+                            
+                            # Support telco base64 audio payload
+                            if "audio" in data and isinstance(data["audio"], dict):
+                                audio_data = data["audio"].get("data")
+                                s_rate = data["audio"].get("sample_rate")
+                                if s_rate and str(s_rate).isdigit():
+                                    input_rate = int(s_rate)
+                                if audio_data:
+                                    raw_bytes = base64.b64decode(audio_data)
+                                    audio_buffer.extend(raw_bytes)
+                                    last_data_time = time.time()
+                            
+                            # Support control frames
+                            if msg_type == "flush":
+                                flush_requested = True
+                            elif msg_type == "start":
+                                call_id = data.get("call_id")
+                                req_model = data.get("model") or data.get("model_name")
+                                if req_model:
+                                    req_model = resolve_model(req_model)
+                                    if req_model == "credresolve:v1" and store.asr_indic is None:
+                                        await send_json_logged({"type": "error", "message": f"Model {req_model} not deployed"})
+                                        break
+                                    elif req_model == "sarga:v1" and store.asr is None:
+                                        await send_json_logged({"type": "error", "message": f"Model {req_model} not deployed"})
+                                        break
+                                    model = req_model
+                                audio_buffer.clear()
+                                last_processed_len = 0
+                                await send_json_logged({"type": "ready", "call_id": call_id})
+                            elif msg_type == "stop":
+                                await send_json_logged({"type": "done"})
+                                break
+                        else:
+                            log_event(f"[{now_str}] [WS] [REQ] [Session: {session_id}] Received text: {msg['text'][:200]}")
                     except Exception as e:
-                        print(f"Error parsing websocket text message: {e}")
+                        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                        log_event(f"[{now_str}] [WS] [DEBUG] Session {session_id} text parse error: {e}. Raw content: {msg['text'][:200]}")
         except WebSocketDisconnect:
             pass
         except Exception as e:
@@ -99,6 +164,9 @@ async def handle_websocket_stream(
     
     last_processed_len = 0
     last_finalized_end_sec = 0.0
+    last_data_time = time.time()
+    
+    is_frontend = str(session_id).startswith("frontend-session")
     
     try:
         # Determine loop interval (e.g. chunk_ms / 1000.0, fallback to 160ms if 0)
@@ -107,8 +175,145 @@ async def handle_websocket_stream(
         while not receive_task.done():
             await asyncio.sleep(check_interval)
             
+            # Non-frontend (Telco / Bot) session logic
+            if not is_frontend:
+                # Case A: If client requested explicit flush-gating (flush_signal=true)
+                if is_flush:
+                    if not flush_requested:
+                        continue
+                    
+                    flush_requested = False
+                    current_len = len(audio_buffer)
+                    duration = current_len / (input_rate * 2.0)
+                    
+                    if current_len > 0:
+                        raw_wav_path = session_dir / "raw.wav"
+                        if input_rate != 16000:
+                            raw_in_path = session_dir / "raw_in.wav"
+                            await asyncio.to_thread(write_pcm16_wav, raw_in_path, bytes(audio_buffer), input_rate)
+                            await asyncio.to_thread(normalize_audio, raw_in_path, raw_wav_path, 16000)
+                        else:
+                            await asyncio.to_thread(write_pcm16_wav, raw_wav_path, bytes(audio_buffer), 16000)
+                        
+                        transcribe_source = raw_wav_path
+                        if is_denoise and store.preprocessor:
+                            denoised_wav_path = session_dir / "denoised.wav"
+                            try:
+                                await asyncio.to_thread(store.preprocessor.denoise_wav, raw_wav_path, denoised_wav_path)
+                                transcribe_source = denoised_wav_path
+                            except Exception as e:
+                                print(f"Flush Denoise error: {e}")
+                        
+                        try:
+                            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                            log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s on flush")
+                            
+                            t_start = time.time()
+                            text = await get_asr_worker().transcribe_async(transcribe_source, language=language)
+                            t_end = time.time()
+                            inference_time_ms = (t_end - t_start) * 1000.0
+                            
+                            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                            log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {inference_time_ms:.1f}ms)")
+                            
+                            response_data = {
+                                "type": "data",
+                                "data": {
+                                    "transcript": text,
+                                    "language_code": language,
+                                    "metrics": {
+                                        "inference_time": round(inference_time_ms, 2)
+                                    }
+                                }
+                            }
+                            await send_json_logged(response_data)
+                        except Exception as e:
+                            print(f"ASR error on flush: {e}")
+                    else:
+                        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                        log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting empty buffer (0.00s) on flush")
+                        
+                        response_data = {
+                            "type": "data",
+                            "data": {
+                                "transcript": "",
+                                "language_code": language,
+                                "metrics": {
+                                    "inference_time": 0.0
+                                }
+                            }
+                        }
+                        await send_json_logged(response_data)
+                    
+                    audio_buffer.clear()
+                    last_processed_len = 0
+                    last_finalized_end_sec = 0.0
+                    continue
+                
+                # Case B: If client did NOT request explicit flush-gating (flush_signal=false),
+                # we run ASR and flush the audio buffer only after 350ms of silence/inactivity.
+                else:
+                    current_len = len(audio_buffer)
+                    if current_len > 0 and (time.time() - last_data_time) > 0.350:
+                        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                        log_event(f"[{now_str}] [WS] [FLUSH] Session {session_id} auto-flushing due to 350ms inactivity.")
+                        duration = current_len / (input_rate * 2.0)
+                        
+                        raw_wav_path = session_dir / "raw.wav"
+                        if input_rate != 16000:
+                            raw_in_path = session_dir / "raw_in.wav"
+                            await asyncio.to_thread(write_pcm16_wav, raw_in_path, bytes(audio_buffer), input_rate)
+                            await asyncio.to_thread(normalize_audio, raw_in_path, raw_wav_path, 16000)
+                        else:
+                            await asyncio.to_thread(write_pcm16_wav, raw_wav_path, bytes(audio_buffer), 16000)
+                        
+                        transcribe_source = raw_wav_path
+                        if is_denoise and store.preprocessor:
+                            denoised_wav_path = session_dir / "denoised.wav"
+                            try:
+                                await asyncio.to_thread(store.preprocessor.denoise_wav, raw_wav_path, denoised_wav_path)
+                                transcribe_source = denoised_wav_path
+                            except Exception as e:
+                                print(f"Auto-Flush Denoise error: {e}")
+                        
+                        try:
+                            log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s on auto-flush")
+                            t_start = time.time()
+                            text = await get_asr_worker().transcribe_async(transcribe_source, language=language)
+                            t_end = time.time()
+                            inference_time_ms = (t_end - t_start) * 1000.0
+                            
+                            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                            log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {inference_time_ms:.1f}ms)")
+                            
+                            response_data = {
+                                "type": "data",
+                                "data": {
+                                    "transcript": text,
+                                    "language_code": language,
+                                    "metrics": {
+                                        "inference_time": round(inference_time_ms, 2)
+                                    }
+                                }
+                            }
+                            await send_json_logged(response_data)
+                        except Exception as e:
+                            print(f"ASR error on auto-flush: {e}")
+                        
+                        audio_buffer.clear()
+                        last_processed_len = 0
+                        last_finalized_end_sec = 0.0
+                    continue
+            
             current_len = len(audio_buffer)
             if current_len == last_processed_len:
+                # Auto-flush on inactivity: if audio buffer exists and we haven't received data for 1.0s
+                if current_len > 0 and (time.time() - last_data_time) > 1.0:
+                    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                    log_event(f"[{now_str}] [WS] [FLUSH] Session {session_id} auto-flushed due to 1.0s inactivity.")
+                    audio_buffer.clear()
+                    last_processed_len = 0
+                    last_finalized_end_sec = 0.0
                 continue
                 
             last_processed_len = current_len
@@ -169,7 +374,7 @@ async def handle_websocket_stream(
                                 now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                                 log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting turn slice: {span_start:.2f}s - {span_end:.2f}s")
                                 t_start = time.time()
-                                text = await store.asr.transcribe_async(turn_wav_path, language=language)
+                                text = await get_asr_worker().transcribe_async(turn_wav_path, language=language)
                                 t_end = time.time()
                                 now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                                 log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {(t_end - t_start)*1000:.1f}ms)")
@@ -182,19 +387,29 @@ async def handle_websocket_stream(
                                 speaker = "Speaker 1" if len(spans) % 2 == 1 else "Speaker 2"
                             
                             is_final = not is_currently_speaking
-                            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                            log_event(f"[{now_str}] [WS] [SEND] [Session: {session_id}] Sending transcript: '{text}' (start={span_start:.2f}s, end={span_end:.2f}s, final={is_final})")
-                            
-                            await websocket.send_json({
-                                "event": "transcript",
-                                "type": "final" if is_final else "partial",
-                                "text": text,
-                                "start": span_start,
-                                "end": span_end,
-                                "speaker": speaker,
-                                "final": is_final,
-                                "ts_ms": int(time.time() * 1000)
-                            })
+                            if is_frontend:
+                                await send_json_logged({
+                                    "event": "transcript",
+                                    "type": "final" if is_final else "partial",
+                                    "text": text,
+                                    "start": span_start,
+                                    "end": span_end,
+                                    "speaker": speaker,
+                                    "final": is_final,
+                                    "ts_ms": int(time.time() * 1000)
+                                })
+                            else:
+                                t_diff = (t_end - t_start) * 1000.0 if 't_start' in locals() and 't_end' in locals() else 0.0
+                                await send_json_logged({
+                                    "type": "data",
+                                    "data": {
+                                        "transcript": text,
+                                        "language_code": language,
+                                        "metrics": {
+                                            "inference_time": round(t_diff, 2)
+                                        }
+                                    }
+                                })
                             
                             if not is_currently_speaking:
                                 last_finalized_end_sec = span_end
@@ -210,26 +425,38 @@ async def handle_websocket_stream(
                     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                     log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s")
                     t_start = time.time()
-                    text = await store.asr.transcribe_async(transcribe_source, language=language)
+                    text = await get_asr_worker().transcribe_async(transcribe_source, language=language)
                     t_end = time.time()
                     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                     log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {(t_end - t_start)*1000:.1f}ms)")
                     
-                    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                    log_event(f"[{now_str}] [WS] [SEND] [Session: {session_id}] Sending transcript: '{text}'")
-                    await websocket.send_json({
-                        "event": "transcript",
-                        "type": "partial",
-                        "text": text,
-                        "start": 0.0,
-                        "end": duration,
-                        "speaker": "Speaker",
-                        "final": False,
-                        "ts_ms": int(time.time() * 1000)
-                    })
-                    if is_flush:
+                    if is_frontend:
+                        await send_json_logged({
+                            "event": "transcript",
+                            "type": "partial",
+                            "text": text,
+                            "start": 0.0,
+                            "end": duration,
+                            "speaker": "Speaker",
+                            "final": False,
+                            "ts_ms": int(time.time() * 1000)
+                        })
+                    else:
+                        t_diff = (t_end - t_start) * 1000.0 if 't_start' in locals() and 't_end' in locals() else 0.0
+                        await send_json_logged({
+                            "type": "data",
+                            "data": {
+                                "transcript": text,
+                                "language_code": language,
+                                "metrics": {
+                                    "inference_time": round(t_diff, 2)
+                                }
+                            }
+                        })
+                    if text.strip() or is_flush:
                         audio_buffer.clear()
                         last_processed_len = 0
+                        last_finalized_end_sec = 0.0
                 except WebSocketDisconnect:
                     raise
                 except Exception as e:
@@ -244,17 +471,18 @@ async def handle_websocket_stream(
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         log_event(f"[{now_str}] [WS] [CLOSE] Session {session_id} disconnected.")
         try:
-            final_duration = len(audio_buffer) / (input_rate * 2.0)
-            await websocket.send_json({
-                "event": "transcript",
-                "type": "done",
-                "text": "",
-                "start": 0.0,
-                "end": final_duration,
-                "speaker": "Speaker",
-                "final": True,
-                "ts_ms": int(time.time() * 1000)
-            })
+            if is_frontend:
+                final_duration = len(audio_buffer) / (input_rate * 2.0)
+                await send_json_logged({
+                    "event": "transcript",
+                    "type": "done",
+                    "text": "",
+                    "start": 0.0,
+                    "end": final_duration,
+                    "speaker": "Speaker",
+                    "final": True,
+                    "ts_ms": int(time.time() * 1000)
+                })
         except Exception:
             pass
 

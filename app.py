@@ -11,13 +11,92 @@ for logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "ne
 
 import csv, io, re, shutil, sys, tempfile
 from pathlib import Path
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from biasing_context import is_hindi
-from pipeline import JobStore
+from pipeline import JobStore, resolve_model
+from streaming_handler import log_event
+import uuid
+import time
+from datetime import datetime
+from starlette.concurrency import iterate_in_threadpool
+
+def deprecated(func):
+    import functools
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        print(f"[WARNING] Client connected to deprecated endpoint '{func.__name__}'. Migrate to /ws/stt.", flush=True)
+        return await func(*args, **kwargs)
+    return wrapper
 
 app=FastAPI(title="Nemotron Streaming ASR Test")
+
+@app.middleware("http")
+async def log_http_requests(request: Request, call_next):
+    request_id = uuid.uuid4().hex[:8]
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    
+    # Check content type of request
+    content_type = request.headers.get("content-type", "")
+    body_str = ""
+    if "multipart/form-data" in content_type:
+        body_str = "[Multipart Form Data]"
+    else:
+        try:
+            body_bytes = await request.body()
+            # Restore request receive stream so downstream handler can consume it
+            async def receive():
+                return {"type": "http.request", "body": body_bytes, "more_body": False}
+            request._receive = receive
+            
+            if body_bytes:
+                body_str = body_bytes.decode("utf-8", errors="replace")
+                if len(body_str) > 1000:
+                    body_str = body_str[:1000] + "... [truncated]"
+            else:
+                body_str = "[empty]"
+        except Exception as e:
+            body_str = f"[Error reading body: {e}]"
+            
+    client_host = request.client.host if request.client else "unknown"
+    log_event(f"[{now_str}] [API] [REQ] [ID: {request_id}] {request.method} {request.url.path} | Client: {client_host} | Query: {request.url.query} | Body: {body_str}")
+    
+    t0 = time.time()
+    try:
+        response = await call_next(request)
+        duration = (time.time() - t0) * 1000.0
+        
+        # Determine if we should read response body
+        is_json = "application/json" in response.headers.get("content-type", "")
+        content_length = response.headers.get("content-length")
+        is_small = True
+        if content_length and int(content_length) > 50000:
+            is_small = False
+            
+        body_to_log = ""
+        if is_json and is_small:
+            try:
+                response_body = [chunk async for chunk in response.body_iterator]
+                response.body_iterator = iterate_in_threadpool(iter(response_body))
+                joined_body = b"".join(response_body)
+                body_to_log = joined_body.decode("utf-8", errors="replace")
+                if len(body_to_log) > 1000:
+                    body_to_log = body_to_log[:1000] + "... [truncated]"
+            except Exception as e:
+                body_to_log = f"[Error reading response: {e}]"
+        else:
+            body_to_log = f"[Content-Type: {response.headers.get('content-type', 'unknown')}]"
+            
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        log_event(f"[{now_str}] [API] [RES] [ID: {request_id}] Status: {response.status_code} | Duration: {duration:.2f}ms | Response: {body_to_log}")
+        return response
+    except Exception as e:
+        duration = (time.time() - t0) * 1000.0
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        log_event(f"[{now_str}] [API] [RES] [ID: {request_id}] Exception: {e} | Duration: {duration:.2f}ms")
+        raise e
 store=JobStore(); ROOT=Path(__file__).parent
 csv.field_size_limit(sys.maxsize)  # transcript columns hold raw beam-search dumps (100k+ chars)
 
@@ -60,6 +139,14 @@ app.mount("/static",StaticFiles(directory=ROOT/"static"),name="static")
 def index():return FileResponse(ROOT/"static"/"index.html")
 @app.get("/api/samples")
 def samples():return [{"name":p.name,"size":p.stat().st_size} for p in sorted((ROOT/"recording").glob("*")) if p.is_file()]
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+@app.get("/healthz")
+def healthz():
+    return Response("ok", media_type="text/plain")
 @app.get("/api/evaluations/{filename}")
 def evaluation(filename:str):
     path=ROOT/Path(filename).name
@@ -112,19 +199,23 @@ def _biasing_context(name,institute_name,total_due,due_date):
     ctx={k:v for k,v in {"name":name,"institute_name":institute_name,"total_due":total_due,"due_date":due_date}.items() if v}
     return ctx or None
 @app.post("/api/jobs")
-def create_job(file:UploadFile=File(...),language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),name:str=Form(None),institute_name:str=Form(None),total_due:str=Form(None),due_date:str=Form(None)):
+def create_job(file:UploadFile=File(...),language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),name:str=Form(None),institute_name:str=Form(None),total_due:str=Form(None),due_date:str=Form(None),model:str=Form("sarga:v1")):
     if chunk_ms not in {80,160,320,560,1120}:raise HTTPException(400,"Unsupported chunk size")
     if itn_backend not in {"custom","nemo","compare"}:raise HTTPException(400,"Unsupported ITN backend")
+    model = resolve_model(model)
+    if model not in {"sarga:v1", "credresolve:v1"}:raise HTTPException(400,"Unsupported model name")
     with tempfile.NamedTemporaryFile(delete=False,suffix=Path(file.filename or "audio.webm").suffix) as temp:
         shutil.copyfileobj(file.file,temp); path=Path(temp.name)
-    try:return store.submit(path,file.filename or "recording.webm",language,chunk_ms,itn_backend,_biasing_context(name,institute_name,total_due,due_date))
+    try:return store.submit(path,file.filename or "recording.webm",language,chunk_ms,itn_backend,_biasing_context(name,institute_name,total_due,due_date),model)
     finally:path.unlink(missing_ok=True)
 @app.post("/api/jobs/sample/{filename}")
-def create_sample_job(filename:str,language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),name:str=Form(None),institute_name:str=Form(None),total_due:str=Form(None),due_date:str=Form(None)):
+def create_sample_job(filename:str,language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),name:str=Form(None),institute_name:str=Form(None),total_due:str=Form(None),due_date:str=Form(None),model:str=Form("sarga:v1")):
     source=(ROOT/"recording"/Path(filename).name)
     if not source.exists():raise HTTPException(404,"Sample not found")
     if itn_backend not in {"custom","nemo","compare"}:raise HTTPException(400,"Unsupported ITN backend")
-    return store.submit(source,source.name,language,chunk_ms,itn_backend,_biasing_context(name,institute_name,total_due,due_date))
+    model = resolve_model(model)
+    if model not in {"sarga:v1", "credresolve:v1"}:raise HTTPException(400,"Unsupported model name")
+    return store.submit(source,source.name,language,chunk_ms,itn_backend,_biasing_context(name,institute_name,total_due,due_date),model)
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id:str):
     job=store.public(job_id)
@@ -139,7 +230,9 @@ def get_audio(job_id:str,kind:str):
 from fastapi import WebSocket
 from streaming_handler import handle_websocket_stream
 
+# DEPRECATED: Use /ws/stt instead
 @app.websocket("/api/stream")
+@deprecated
 async def websocket_stream(
     websocket: WebSocket,
     language: str = "hi-IN",
@@ -155,6 +248,7 @@ async def websocket_stream(
         call_code = websocket.query_params.get("call_code") or websocket.query_params.get("call-code")
     if not flush_signal or flush_signal == "false":
         flush_signal = websocket.query_params.get("flush_signal") or "false"
+    model = websocket.query_params.get("model") or "sarga:v1"
     await handle_websocket_stream(
         websocket=websocket,
         store=store,
@@ -165,7 +259,8 @@ async def websocket_stream(
         input_rate=input_rate,
         chunk_ms=chunk_ms,
         call_code=call_code,
-        flush_signal=flush_signal
+        flush_signal=flush_signal,
+        model=model
     )
 
 @app.websocket("/ws/stt")
@@ -192,6 +287,8 @@ async def ws_stt(
     # Map flush_signal query parameter (defaults to "false")
     flush_signal = websocket.query_params.get("flush_signal") or "false"
     
+    model = websocket.query_params.get("model") or "sarga:v1"
+    
     # Run in Immediate Mode (chunk_ms=0, denoise=true)
     await handle_websocket_stream(
         websocket=websocket,
@@ -203,7 +300,8 @@ async def ws_stt(
         input_rate=input_rate,
         chunk_ms=0,
         call_code=call_code,
-        flush_signal=flush_signal
+        flush_signal=flush_signal,
+        model=model
     )
 
 
