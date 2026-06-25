@@ -21,6 +21,7 @@ $('tab-realtime').onclick = () => {
   $('mode-badge').className = 'badge';
   $('audio-players-container').classList.add('hidden');
   $('eval').classList.add('hidden');
+  $('batch-jobs-panel').classList.add('hidden');
   $('sessions-card').classList.add('hidden');
   $('onboarding-panel').classList.remove('hidden');
   $('status').classList.add('hidden');
@@ -39,11 +40,12 @@ $('tab-batch').onclick = () => {
   $('mode-badge').className = 'badge badge-indigo';
   $('audio-players-container').classList.add('hidden');
   $('eval').classList.add('hidden');
+  $('batch-jobs-panel').classList.add('hidden');
   $('sessions-card').classList.remove('hidden');
   $('onboarding-panel').classList.remove('hidden');
   $('status').classList.add('hidden');
   $('result').classList.add('hidden');
-  resetTurnsConsole('Drag & drop or select an audio file to transcribe.');
+  resetTurnsConsole('Drag & drop or select audio files to transcribe.');
 };
 
 $('tab-eval').onclick = () => {
@@ -57,6 +59,7 @@ $('tab-eval').onclick = () => {
   $('onboarding-panel').classList.add('hidden');
   $('status').classList.add('hidden');
   $('result').classList.add('hidden');
+  $('batch-jobs-panel').classList.add('hidden');
   $('eval').classList.remove('hidden');
   $('sessions-card').classList.add('hidden');
 };
@@ -351,7 +354,13 @@ document.addEventListener('click', e => {
   }
 });
 
-$('file').onchange = e => e.target.files[0] && submitFile(e.target.files[0]);
+$('file').onchange = e => {
+  if (e.target.files.length > 1) {
+    submitBatchFiles(Array.from(e.target.files));
+  } else if (e.target.files[0]) {
+    submitFile(e.target.files[0]);
+  }
+};
 
 function options(fd) {
   fd.append('language', $('language').value);
@@ -536,3 +545,161 @@ document.getElementById("eval-filter").onchange = renderEvaluation;
 document.getElementById("eval-refresh").onclick = loadEvaluation;
 loadSamples();
 loadEvaluation();
+
+async function submitBatchFiles(files) {
+  $('onboarding-panel').classList.add('hidden');
+  $('status').classList.add('hidden');
+  $('result').classList.add('hidden');
+  $('batch-jobs-panel').classList.remove('hidden');
+  
+  $('download-csv-btn').disabled = true;
+  $('batch-stage').textContent = 'Submitting...';
+  $('batch-percent').textContent = '0%';
+  $('batch-progress').value = 0;
+  
+  const tbody = $('batch-files-tbody');
+  tbody.innerHTML = '';
+  
+  const fileTracks = files.map((file, idx) => {
+    const rowId = `batch-row-${idx}`;
+    const tr = document.createElement('tr');
+    tr.id = rowId;
+    tr.style.borderBottom = '1px solid var(--border-color)';
+    tr.innerHTML = `
+      <td style="padding: 12px 15px; font-weight: 600; color: var(--text-dark);">${esc(file.name)}</td>
+      <td class="batch-file-stage" style="padding: 12px 15px; color: var(--text-light);">Queued</td>
+      <td class="batch-file-progress" style="padding: 12px 15px; font-weight: 700;">0%</td>
+      <td class="batch-file-preview" style="padding: 12px 15px; color: var(--text-light); font-style: italic;">Waiting...</td>
+    `;
+    tbody.appendChild(tr);
+    
+    return {
+      file: file,
+      rowId: rowId,
+      jobId: null,
+      status: 'queued',
+      stage: 'queued',
+      progress: 0,
+      transcript: '',
+      error: ''
+    };
+  });
+  
+  for (let track of fileTracks) {
+    const fd = options(new FormData());
+    fd.append('file', track.file);
+    try {
+      const job = await fetch('/api/jobs', { method: 'POST', body: fd }).then(r => r.json());
+      track.jobId = job.id;
+      track.status = job.status;
+      track.stage = job.stage;
+      track.progress = job.progress;
+      updateBatchRow(track);
+    } catch (err) {
+      track.status = 'failed';
+      track.stage = 'failed';
+      track.error = 'Submission failed: ' + err.message;
+      updateBatchRow(track);
+    }
+  }
+  
+  pollBatch(fileTracks);
+}
+
+function updateBatchRow(track) {
+  const row = $(track.rowId);
+  if (!row) return;
+  
+  const stageCell = row.querySelector('.batch-file-stage');
+  const progressCell = row.querySelector('.batch-file-progress');
+  const previewCell = row.querySelector('.batch-file-preview');
+  
+  stageCell.textContent = track.stage;
+  progressCell.textContent = track.progress + '%';
+  
+  if (track.status === 'complete') {
+    stageCell.innerHTML = `<span style="color: #10b981; font-weight: 600;">Complete</span>`;
+    const cleanUrl = `/api/jobs/${track.jobId}/audio/normalized`;
+    const previewText = track.transcript ? track.transcript.substring(0, 80) + '...' : 'Empty transcript';
+    previewCell.innerHTML = `
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <span style="color: var(--text-dark);">${esc(previewText)}</span>
+        <a href="${cleanUrl}" target="_blank" style="font-size: 11px; color: var(--color-primary, #6366f1); font-weight: 600; text-decoration: none;">🔊 Open Audio</a>
+      </div>
+    `;
+  } else if (track.status === 'failed') {
+    stageCell.innerHTML = `<span style="color: #ef4444; font-weight: 600;">Failed</span>`;
+    previewCell.innerHTML = `<span style="color: #ef4444;">${esc(track.error)}</span>`;
+  } else {
+    previewCell.textContent = 'Processing...';
+  }
+}
+
+async function pollBatch(fileTracks) {
+  let allDone = false;
+  
+  while (!allDone) {
+    allDone = true;
+    let completedCount = 0;
+    let totalProgress = 0;
+    
+    for (let track of fileTracks) {
+      if (track.status === 'complete' || track.status === 'failed') {
+        completedCount++;
+        totalProgress += 100;
+        continue;
+      }
+      
+      if (!track.jobId) {
+        allDone = false;
+        continue;
+      }
+      
+      try {
+        const job = await fetch('/api/jobs/' + track.jobId).then(r => r.json());
+        track.status = job.status;
+        track.stage = job.stage;
+        track.progress = job.progress;
+        
+        if (job.status === 'complete') {
+          track.transcript = job.result ? (job.result.transcript || '') : '';
+        } else if (job.status === 'failed') {
+          track.error = job.error || 'Unknown ASR error';
+        }
+        
+        updateBatchRow(track);
+        
+        if (track.status !== 'complete' && track.status !== 'failed') {
+          allDone = false;
+        } else {
+          completedCount++;
+        }
+        totalProgress += track.progress;
+      } catch (err) {
+        track.status = 'failed';
+        track.stage = 'failed';
+        track.error = 'Polling failed: ' + err.message;
+        updateBatchRow(track);
+        completedCount++;
+        totalProgress += 100;
+      }
+    }
+    
+    const overallProgress = Math.round(totalProgress / fileTracks.length);
+    $('batch-progress').value = overallProgress;
+    $('batch-percent').textContent = overallProgress + '%';
+    $('batch-stage').textContent = allDone ? 'Complete' : `Processing (${completedCount}/${fileTracks.length} done)`;
+    
+    if (!allDone) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+  }
+  
+  const jobIds = fileTracks.filter(t => t.jobId).map(t => t.jobId).join(',');
+  if (jobIds) {
+    $('download-csv-btn').disabled = false;
+    $('download-csv-btn').onclick = () => {
+      window.location.href = `/api/jobs/batch/csv?job_ids=${encodeURIComponent(jobIds)}`;
+    };
+  }
+}

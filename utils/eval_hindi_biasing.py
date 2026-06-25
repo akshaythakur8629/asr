@@ -22,9 +22,9 @@ import time
 import urllib.request
 from pathlib import Path
 
-from biasing_context import institute_to_brand, is_hindi, normalize_hindi_language
+from .biasing_context import institute_to_brand, is_hindi, normalize_hindi_language
 from context_biasing.variant_generator import generate_general_variants
-from pipeline import JobStore
+from .pipeline import JobStore
 
 
 def download(url: str, dest: Path) -> Path:

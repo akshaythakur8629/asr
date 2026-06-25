@@ -1,4 +1,4 @@
-from biasing_context import is_hindi, normalize_hindi_language
+from utils.biasing_context import is_hindi, normalize_hindi_language
 
 
 def test_common_hindi_csv_language_labels_normalize_to_nemo_prompt_key():

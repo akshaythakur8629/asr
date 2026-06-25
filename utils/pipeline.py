@@ -5,8 +5,8 @@ import shutil, threading, time, traceback, uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
-from audio_processing import AudioPreprocessor, normalize_audio, probe_channel_count, slice_wav, split_channels, wav_duration
-from transcript_render import render_markdown_transcript
+from .audio_processing import AudioPreprocessor, normalize_audio, probe_channel_count, slice_wav, split_channels, wav_duration
+from .transcript_render import render_markdown_transcript
 
 DEPLOY_NEMOTRON = os.environ.get("DEPLOY_NEMOTRON", "true").lower() == "true"
 DEPLOY_INDIC = os.environ.get("DEPLOY_INDIC", "false").lower() == "true"
@@ -32,8 +32,8 @@ SpeakerTurn = None
 
 if DEPLOY_NEMOTRON:
     try:
-        from diarize_inventory import NemoTelephonyDiarizer, SpeakerTurn
-        from nemotron_streaming import NemotronStreamingASR
+        from .diarize_inventory import NemoTelephonyDiarizer, SpeakerTurn
+        from nemotron_model.model import NemotronStreamingASR
     except ImportError as e:
         print(f"Warning: Failed to import NeMo dependencies: {e}")
 
@@ -57,8 +57,11 @@ if DEPLOY_INDIC:
 class JobStore:
     def __init__(self, root=Path("/tmp/nemotron-test"), ttl_seconds=3600):
         self.root=Path(root); self.root.mkdir(parents=True,exist_ok=True); self.ttl=ttl_seconds
-        self.jobs:dict[str,dict[str,Any]]={}; self.lock=threading.Lock(); self.executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix="nemotron-job")
+        self.jobs:dict[str,dict[str,Any]]={}; self.lock=threading.Lock(); self.executor=ThreadPoolExecutor(max_workers=5,thread_name_prefix="nemotron-job")
         self.preprocessor=None; self.diarizer=None; self.asr=None; self.asr_indic=None
+        self.diarizer_lock = threading.Lock()
+        self.asr_lock = threading.Lock()
+        self.asr_indic_lock = threading.Lock()
     def submit(self, source:Path, filename:str, language="hi-IN", chunk_ms=1120, itn_backend="custom", biasing_context=None, model="sarga:v1")->dict:
         model = resolve_model(model)
         job_id=uuid.uuid4().hex; job_dir=self.root/job_id; job_dir.mkdir(parents=True)
@@ -74,16 +77,19 @@ class JobStore:
             job=self.jobs.get(job_id)
             return dict(job) if job else None
     def _ensure_models(self):
-        if self.preprocessor is None:
-            self.preprocessor=AudioPreprocessor()
-        if DEPLOY_NEMOTRON:
-            if self.diarizer is None and NemoTelephonyDiarizer is not None:
-                self.diarizer=NemoTelephonyDiarizer(device="cuda:1",max_speakers=2)
-            if self.asr is None and NemotronStreamingASR is not None:
-                self.asr=NemotronStreamingASR(device="cuda:0")
-        if DEPLOY_INDIC:
-            if self.asr_indic is None and IndicStreamingASR is not None:
-                self.asr_indic=IndicStreamingASR(device="cuda:0")
+        with self.lock:
+            if self.preprocessor is None:
+                self.preprocessor=AudioPreprocessor()
+            if DEPLOY_NEMOTRON:
+                if self.diarizer is None and NemoTelephonyDiarizer is not None:
+                    import torch
+                    diarizer_device = "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
+                    self.diarizer=NemoTelephonyDiarizer(device=diarizer_device,max_speakers=2)
+                if self.asr is None and NemotronStreamingASR is not None:
+                    self.asr=NemotronStreamingASR(device="cuda:0")
+            if DEPLOY_INDIC:
+                if self.asr_indic is None and IndicStreamingASR is not None:
+                    self.asr_indic=IndicStreamingASR(device="cuda:0")
     def _run(self,job_id,source,language,chunk_ms,itn_backend,biasing_context=None,model="sarga:v1"):
         job_dir=self.root/job_id; metrics={}; started=time.perf_counter(); biasing_applied=False
         try:
@@ -91,24 +97,19 @@ class JobStore:
             normalized=normalize_audio(source,job_dir/"normalized.wav"); metrics["normalize_seconds"]=round(time.perf_counter()-t,3)
             self.update(job_id,stage="loading_models",progress=15); self._ensure_models()
             
-            if model == "sarga:v1":
-                metrics["biasing"]=self._configure_biasing(language,biasing_context,job_dir)
-                biasing_applied=bool(metrics["biasing"] and metrics["biasing"].get("applied"))
-            else:
-                metrics["biasing"]={"applied":False,"reason":"model_not_nemotron"}
-                
             self.update(job_id,stage="denoising",progress=25); t=time.perf_counter(); denoised=self.preprocessor.denoise_wav(normalized,job_dir/"denoised.wav"); metrics["denoise_seconds"]=round(time.perf_counter()-t,3)
             channel_count=probe_channel_count(source); channel_clips={}
             
             self.update(job_id,stage="diarizing",progress=45); t=time.perf_counter()
             turns = None
             if self.diarizer is not None:
-                if channel_count>=2:
-                    channels=split_channels(source,job_dir/"channels")
-                    channel_clips={index:self.preprocessor.denoise_wav(path,job_dir/f"channel_{index}_denoised.wav") for index,path in enumerate(channels)}
-                    turns=self.diarizer.diarize_channels(channels,job_dir/"diarization"); metrics["diarization_mode"]="per_channel"; metrics["channels"]=channel_count
-                else:
-                    turns=self.diarizer.diarize(normalized,job_dir/"diarization"); metrics["diarization_mode"]="clustering"
+                with self.diarizer_lock:
+                    if channel_count>=2:
+                        channels=split_channels(source,job_dir/"channels")
+                        channel_clips={index:self.preprocessor.denoise_wav(path,job_dir/f"channel_{index}_denoised.wav") for index,path in enumerate(channels)}
+                        turns=self.diarizer.diarize_channels(channels,job_dir/"diarization"); metrics["diarization_mode"]="per_channel"; metrics["channels"]=channel_count
+                    else:
+                        turns=self.diarizer.diarize(normalized,job_dir/"diarization"); metrics["diarization_mode"]="clustering"
                 metrics["diarization_seconds"]=round(time.perf_counter()-t,3)
             else:
                 metrics["diarization_seconds"]=0.0
@@ -118,39 +119,68 @@ class JobStore:
                 turns=[SpeakerTurn("speaker_0",0.0,wav_duration(normalized),False)]
                 
             results=[]; asr_started=time.perf_counter()
-            for index,turn in enumerate(turns):
-                self.update(job_id,stage=f"transcribing turn {index+1}/{len(turns)}",progress=55+int(40*(index/max(1,len(turns)))))
-                clip_source=channel_clips.get(turn.channel,denoised) if turn.channel is not None else denoised
-                clip=slice_wav(clip_source,job_dir/f"turn_{index:04d}.wav",turn.start_sec,turn.end_sec)
-                
-                if model in {"sarga:v1.1", "credresolve:v1"}:
-                    if self.asr_indic is None:
-                        raise RuntimeError(f"Model {model} (Indic Conformer) is not deployed on this server.")
-                    text=self.asr_indic.transcribe(clip,language=language,chunk_ms=chunk_ms)
+            detected_languages=[]
+            asr_lock_to_use = self.asr_indic_lock if model in {"sarga:v1.1", "credresolve:v1"} else self.asr_lock
+            
+            with asr_lock_to_use:
+                if model == "sarga:v1":
+                    metrics["biasing"]=self._configure_biasing(language,biasing_context,job_dir)
+                    biasing_applied=bool(metrics["biasing"] and metrics["biasing"].get("applied"))
                 else:
-                    if self.asr is None:
-                        raise RuntimeError(f"Model {model} (Nemotron) is not deployed on this server.")
-                    text=self.asr.transcribe(clip,language=language,chunk_ms=chunk_ms)
+                    metrics["biasing"]={"applied":False,"reason":"model_not_nemotron"}
                     
-                if text.strip():
-                    normalized_turn=_normalize_turn(text,language,itn_backend)
-                    results.append({"speaker":turn.speaker,"start_sec":round(turn.start_sec,3),"end_sec":round(turn.end_sec,3),"overlap_flag":turn.overlap_flag,"text":text,**normalized_turn})
+                try:
+                    for index,turn in enumerate(turns):
+                        self.update(job_id,stage=f"transcribing turn {index+1}/{len(turns)}",progress=55+int(40*(index/max(1,len(turns)))))
+                        clip_source=channel_clips.get(turn.channel,denoised) if turn.channel is not None else denoised
+                        clip=slice_wav(clip_source,job_dir/f"turn_{index:04d}.wav",turn.start_sec,turn.end_sec)
+                        
+                        if model in {"sarga:v1.1", "credresolve:v1"}:
+                            if self.asr_indic is None:
+                                raise RuntimeError(f"Model {model} (Indic Conformer) is not deployed on this server.")
+                            text, resolved_lang = self.asr_indic.transcribe_with_lang(clip,language=language,chunk_ms=chunk_ms)
+                        else:
+                            if self.asr is None:
+                                raise RuntimeError(f"Model {model} (Nemotron) is not deployed on this server.")
+                            text, resolved_lang = self.asr.transcribe_with_lang(clip,language=language,chunk_ms=chunk_ms)
+                            
+                        if text.strip():
+                            normalized_turn=_normalize_turn(text,resolved_lang,itn_backend)
+                            results.append({"speaker":turn.speaker,"start_sec":round(turn.start_sec,3),"end_sec":round(turn.end_sec,3),"overlap_flag":turn.overlap_flag,"text":text,"language_id":resolved_lang,**normalized_turn})
+                            detected_languages.append(resolved_lang)
+                finally:
+                    if biasing_applied:
+                        try:self.asr.reset_decoding()
+                        except Exception:pass  # never let cleanup mask the job result
             results=_merge_and_label_turns(results)
+            
+            if detected_languages:
+                from collections import Counter
+                overall_lang = Counter(detected_languages).most_common(1)[0][0]
+            else:
+                overall_lang = language if language != "auto" else "hi-IN"
+                
             metrics["asr_seconds"]=round(time.perf_counter()-asr_started,3); metrics["total_seconds"]=round(time.perf_counter()-started,3); metrics["audio_seconds"]=round(wav_duration(normalized),3)
-            result={"turns":results,"transcript":"\n".join(f"{x['speaker']}: {x['canonical_text']}" for x in results),"raw_transcript":"\n".join(f"{x['speaker']}: {x['text']}" for x in results),"markdown":render_markdown_transcript(results),"itn_backend":itn_backend,"metrics":metrics,"original_url":f"/api/jobs/{job_id}/audio/normalized","denoised_url":f"/api/jobs/{job_id}/audio/denoised"}
+            result={
+                "turns":results,
+                "transcript":"\n".join(f"{x['speaker']}: {x['canonical_text']}" for x in results),
+                "raw_transcript":"\n".join(f"{x['speaker']}: {x['text']}" for x in results),
+                "markdown":render_markdown_transcript(results),
+                "itn_backend":itn_backend,
+                "language_id":overall_lang,
+                "metrics":metrics,
+                "original_url":f"/api/jobs/{job_id}/audio/normalized",
+                "denoised_url":f"/api/jobs/{job_id}/audio/denoised"
+            }
             self.update(job_id,status="complete",stage="complete",progress=100,result=result)
         except Exception as exc:
             self.update(job_id,status="failed",stage="failed",error=f"{type(exc).__name__}: {exc}",traceback=traceback.format_exc())
-        finally:
-            if biasing_applied:
-                try:self.asr.reset_decoding()
-                except Exception:pass  # never let cleanup mask the job result
     def _configure_biasing(self,language,biasing_context,job_dir):
         """Build a per-row boosting-tree phrase pack (Hindi only) and switch the ASR
         decode to bias toward the row's name/lender/amount/date. Returns a metrics
         dict; on any failure the job continues unbiased rather than erroring."""
         if not biasing_context:return None
-        from biasing_context import build_key_phrases_file,is_hindi
+        from .biasing_context import build_key_phrases_file,is_hindi
         if not is_hindi(language):return {"applied":False,"reason":"language_not_hindi"}
         try:
             built=build_key_phrases_file(biasing_context,language=language,out_dir=job_dir/"biasing")

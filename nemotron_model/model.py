@@ -16,8 +16,6 @@ DECODING_STRATEGY="maes"  # RNN-T beam search; higher accuracy than greedy when 
 BEAM_SIZE=4
 FULL_CONTEXT=[-1,-1]  # unlimited left+right attention = offline full-context decoding, the most accurate setting
 ATTENTION_CONTEXTS={80:[56,0],160:[56,1],320:[56,3],560:[56,6],1120:[56,13]}
-# NeMo's GPU boosting tree only attaches to *batched* beam strategies (it raises
-# NotImplementedError for `maes`), so biased turns decode with malsd_batch.
 BIASING_STRATEGY="malsd_batch"
 BIASING_ALPHA=1.0       # fusion weight of the boosting tree against the acoustic/LM score
 BIASING_CONTEXT_SCORE=1.5  # per-arc boost inside the context graph; >~2 makes the decoder
@@ -124,6 +122,10 @@ class NemotronStreamingASR:
                 results=self.model.transcribe([str(audio)],**kwargs)
         if isinstance(results,tuple): results=results[0]  # transducer .transcribe may return (best, all)
         return _hypothesis_text(results[0] if results else "")
+    def transcribe_with_lang(self, audio: Path, language="hi-IN", chunk_ms=None) -> tuple[str, str]:
+        text = self.transcribe(audio, language=language, chunk_ms=chunk_ms)
+        resolved_lang = language if language != "auto" else "hi-IN"
+        return text, resolved_lang
     def transcribe_streaming(self,audio:Path,language="hi-IN",chunk_ms=1120)->str:
         """Real-time cache-aware streaming path (fallback). Defaults to the most accurate wired
         context [56,13] (1120 ms lookahead) rather than 320 ms."""

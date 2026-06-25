@@ -93,7 +93,11 @@ class ONNXIndicASRWorker:
     def load(self) -> None:
         log.info("Loading ONNX model: %s on %s", self.model_name, self.device)
         try:
-            snapshot_path = snapshot_download(repo_id=self.model_name, token=self.hf_token)
+            try:
+                snapshot_path = snapshot_download(repo_id=self.model_name, token=self.hf_token, local_files_only=False)
+            except Exception as exc:
+                log.warning("HuggingFace hub download failed or unauthorized. Trying local cache only: %s", exc)
+                snapshot_path = snapshot_download(repo_id=self.model_name, token=self.hf_token, local_files_only=True)
             self.snapshot_path = snapshot_path
 
             model_onnx_path = Path(snapshot_path) / "model_onnx.py"
@@ -496,7 +500,7 @@ class IndicStreamingASR:
             pcm16le = f.readframes(f.getnframes())
             sample_rate = f.getframerate()
         
-        lang = language.split("-", 1)[0] if language and language != "auto" else "hi"
+        lang = language.split("-", 1)[0] if language and language != "auto" else "auto"
         result = self.worker.transcribe_pcm16(
             pcm16le=pcm16le,
             sample_rate=sample_rate,
@@ -507,6 +511,26 @@ class IndicStreamingASR:
             mode="final",
         )
         return result.text
+
+    def transcribe_with_lang(self, audio_path: Path, language="hi", chunk_ms=None) -> tuple[str, str]:
+        import wave
+        with wave.open(str(audio_path), "rb") as f:
+            pcm16le = f.readframes(f.getnframes())
+            sample_rate = f.getframerate()
+        
+        lang = language.split("-", 1)[0] if language and language != "auto" else "auto"
+        result = self.worker.transcribe_pcm16(
+            pcm16le=pcm16le,
+            sample_rate=sample_rate,
+            decoder=self.worker.default_decoder,
+            language=lang,
+            session_id=None,
+            utterance_id=None,
+            mode="final",
+        )
+        locale_map = {"hi": "hi-IN", "te": "te-IN", "ta": "ta-IN", "mr": "mr-IN"}
+        resolved_lang = locale_map.get(result.language, result.language)
+        return result.text, resolved_lang
 
     async def transcribe_async(self, audio_path: Path, language="hi") -> str:
         return await asyncio.to_thread(self.transcribe, audio_path, language)

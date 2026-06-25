@@ -9,14 +9,14 @@ logging.getLogger().setLevel(logging.ERROR)
 for logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "nemo", "NeMo"]:
     logging.getLogger(logger_name).setLevel(logging.ERROR)
 
-import csv, io, re, shutil, sys, tempfile
+import csv, io, re, shutil, sys, tempfile, asyncio
 from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from biasing_context import is_hindi
-from pipeline import JobStore, resolve_model
+from utils.biasing_context import is_hindi
+from utils.pipeline import JobStore, resolve_model
 from streaming_handler import log_event
 import uuid
 import time
@@ -303,5 +303,118 @@ async def ws_stt(
         flush_signal=flush_signal,
         model=model
     )
+
+
+def _make_public_audio_link(request: Request, job_id: str) -> str:
+    base = str(request.base_url).rstrip('/')
+    if "localhost" in base or "127.0.0.1" in base or ":8000" in base:
+        base = "http://13.234.132.26:8002"
+    return f"{base}/api/jobs/{job_id}/audio/normalized"
+
+
+@app.get("/api/jobs/batch/csv")
+def get_batch_csv(job_ids: str, request: Request):
+    ids = [jid.strip() for jid in job_ids.split(",") if jid.strip()]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["filename", "audio_link", "language_id", "transcript"])
+    for jid in ids:
+        job = store.public(jid)
+        if job:
+            filename = job.get("filename", "audio.wav")
+            status = job.get("status")
+            language_id = "unknown"
+            if status == "complete":
+                result = job.get("result") or {}
+                transcript = result.get("transcript") or ""
+                language_id = result.get("language_id") or job.get("language") or "hi-IN"
+            elif status == "failed":
+                transcript = f"ERROR: {job.get('error')}"
+                language_id = job.get("language") or "hi-IN"
+            else:
+                transcript = f"STATUS: {status}"
+                language_id = job.get("language") or "hi-IN"
+            audio_link = _make_public_audio_link(request, jid)
+            writer.writerow([filename, audio_link, language_id, transcript])
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=batch_transcript.csv"}
+    )
+
+
+@app.post("/api/jobs/batch")
+async def create_batch_job(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    language: str = Form("hi-IN"),
+    chunk_ms: int = Form(1120),
+    itn_backend: str = Form("custom"),
+    model: str = Form("sarga:v1")
+):
+    if chunk_ms not in {80, 160, 320, 560, 1120}:
+        raise HTTPException(400, "Unsupported chunk size")
+    if itn_backend not in {"custom", "nemo", "compare"}:
+        raise HTTPException(400, "Unsupported ITN backend")
+    model = resolve_model(model)
+    if model not in {"sarga:v1", "credresolve:v1"}:
+        raise HTTPException(400, "Unsupported model name")
+
+    job_ids = []
+    for file in files:
+        suffix = Path(file.filename or "audio.webm").suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:
+            shutil.copyfileobj(file.file, temp)
+            path = Path(temp.name)
+        try:
+            job = store.submit(
+                path,
+                file.filename or "recording.webm",
+                language,
+                chunk_ms,
+                itn_backend,
+                None,
+                model
+            )
+            job_ids.append((job["id"], file.filename or "recording.webm"))
+        finally:
+            path.unlink(missing_ok=True)
+
+    completed = False
+    while not completed:
+        completed = True
+        for job_id, _ in job_ids:
+            job = store.public(job_id)
+            if not job or job.get("status") not in {"complete", "failed"}:
+                completed = False
+                break
+        if not completed:
+            await asyncio.sleep(0.5)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["filename", "audio_link", "language_id", "transcript"])
+    for job_id, filename in job_ids:
+        job = store.public(job_id)
+        language_id = "unknown"
+        if job and job.get("status") == "complete":
+            result = job.get("result") or {}
+            transcript = result.get("transcript") or ""
+            language_id = result.get("language_id") or job.get("language") or "hi-IN"
+        elif job and job.get("status") == "failed":
+            transcript = f"ERROR: {job.get('error')}"
+            language_id = job.get("language") or "hi-IN"
+        else:
+            transcript = "ERROR: Job data lost"
+            language_id = language
+        audio_link = _make_public_audio_link(request, job_id)
+        writer.writerow([filename, audio_link, language_id, transcript])
+
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=batch_transcript.csv"}
+    )
+
 
 

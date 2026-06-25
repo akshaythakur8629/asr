@@ -1,6 +1,6 @@
 import tempfile, unittest
 from pathlib import Path
-from diarize_inventory import parse_rttm
+from utils.diarize_inventory import parse_rttm
 class DiarizationTests(unittest.TestCase):
     def test_parse_sort_and_overlap(self):
         with tempfile.TemporaryDirectory() as d:

@@ -42,7 +42,7 @@ def _turn_is_dominant(channel_db: list[list[float]], frame_sec: float, channel: 
 def gate_crosstalk_turns(turns: list[SpeakerTurn], channels: list[Path], margin_db: float = 3.0, keep_fraction: float = 0.5, speech_floor_db: float = 30.0) -> list[SpeakerTurn]:
     """Drop per-channel turns dominated by another channel's leakage (echo/cross-talk)."""
     if len(channels) < 2: return turns
-    from audio_processing import framewise_rms_db
+    from .audio_processing import framewise_rms_db
     channel_db: list[list[float]] = []; frame_sec = 0.03
     for path in channels:
         db, frame_sec = framewise_rms_db(path); channel_db.append(db)

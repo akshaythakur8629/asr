@@ -1,4 +1,4 @@
-from transcript_render import render_markdown_transcript
+from utils.transcript_render import render_markdown_transcript
 
 
 def _turn(speaker, start, end, canonical, **extra):

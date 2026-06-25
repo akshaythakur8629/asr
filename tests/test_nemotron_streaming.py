@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from nemotron_streaming import (
+from nemotron_model.model import (
     ATTENTION_CONTEXTS,
     DECODING_STRATEGY,
     MODEL_NAME,

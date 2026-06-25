@@ -1,6 +1,6 @@
 import tempfile, unittest
 from pathlib import Path
-from pipeline import JobStore, _merge_and_label_turns
+from utils.pipeline import JobStore, _merge_and_label_turns
 class PipelineTests(unittest.TestCase):
     def test_audio_path_rejects_unknown_kind(self):
         with tempfile.TemporaryDirectory() as d:

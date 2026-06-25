@@ -1,7 +1,7 @@
 import tempfile, unittest, wave
 from pathlib import Path
 import numpy as np
-from audio_processing import normalize_audio, read_pcm16_wav, slice_wav, wav_duration, write_pcm16_wav
+from utils.audio_processing import normalize_audio, read_pcm16_wav, slice_wav, wav_duration, write_pcm16_wav
 class AudioTests(unittest.TestCase):
     def test_write_read_and_slice(self):
         with tempfile.TemporaryDirectory() as d:

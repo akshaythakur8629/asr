@@ -144,8 +144,8 @@
         
         <div id="batch-actions" class="actions-panel hidden">
           <label class="btn btn-primary btn-violet upload-label">
-            <span class="btn-icon">📁</span> Select File
-            <input id="file" type="file" accept="audio/*">
+            <span class="btn-icon">📁</span> Select Files
+            <input id="file" type="file" accept="audio/*" multiple>
           </label>
         </div>
       </div>
@@ -217,6 +217,47 @@
           <div id="turns" class="dialogue-container">
             <!-- Transcript bubbles will render here -->
           </div>
+        </div>
+      </section>
+
+      <!-- Batch Processing Panel -->
+      <section id="batch-jobs-panel" class="console-panel results-panel hidden" style="padding: 20px;">
+        <div class="eval-header-block" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid var(--border-color); padding-bottom: 15px;">
+          <div>
+            <span class="badge badge-indigo">Batch Mode</span>
+            <h3 style="margin-top: 5px; font-size: 20px; font-weight: 700; color: var(--text-dark);">Batch Job Status</h3>
+          </div>
+          <div class="eval-controls">
+            <button id="download-csv-btn" class="btn btn-primary btn-violet" disabled style="padding: 8px 16px; font-size: 13px;">
+              <span class="btn-icon">📥</span> Download CSV
+            </button>
+          </div>
+        </div>
+
+        <div id="batch-overall-progress" style="margin-bottom: 25px; background: rgba(0,0,0,0.02); padding: 15px; border-radius: 8px; border: 1px solid var(--border-color);">
+          <div class="statusline" style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 8px;">
+            <span class="status-stage">Overall Status: <strong id="batch-stage">Idle</strong></span>
+            <span id="batch-percent" class="status-percent">0%</span>
+          </div>
+          <div class="progress-bar-container">
+            <progress id="batch-progress" max="100" value="0" style="width: 100%; height: 8px; border-radius: 4px; overflow: hidden;"></progress>
+          </div>
+        </div>
+
+        <div class="batch-files-list-container" style="overflow-x: auto; background: white; border-radius: 8px; border: 1px solid var(--border-color); box-shadow: 0 2px 8px rgba(0,0,0,0.04);">
+          <table class="batch-table" style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
+            <thead>
+              <tr style="background: #fdfdfd; border-bottom: 2px solid var(--border-color); color: var(--text-light); font-weight: 700;">
+                <th style="padding: 12px 15px; width: 25%;">File Name</th>
+                <th style="padding: 12px 15px; width: 15%;">Stage</th>
+                <th style="padding: 12px 15px; width: 15%;">Progress</th>
+                <th style="padding: 12px 15px; width: 45%;">Transcript Preview / Error</th>
+              </tr>
+            </thead>
+            <tbody id="batch-files-tbody">
+              <!-- Rows will be injected here dynamically -->
+            </tbody>
+          </table>
         </div>
       </section>
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from nemotron_streaming import NemotronStreamingASR
+from nemotron_model.model import NemotronStreamingASR
 
 
 def main() -> None:

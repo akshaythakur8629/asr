@@ -9,9 +9,9 @@ import base64
 from datetime import datetime
 from pathlib import Path
 from fastapi import WebSocket, WebSocketDisconnect
-from audio_processing import write_pcm16_wav, slice_wav, normalize_audio
+from utils.audio_processing import write_pcm16_wav, slice_wav, normalize_audio
 from silero_vad import get_speech_timestamps, read_audio
-from pipeline import resolve_model
+from utils.pipeline import resolve_model
 
 # Setup a clean logger that writes ONLY request and response events to app.log
 req_res_logger = logging.getLogger("req_res_logger")
