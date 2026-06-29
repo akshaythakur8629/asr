@@ -102,7 +102,7 @@ async function startWebSocketStream() {
   const denoise = $('denoise').value;
   const vad = $('vad').value;
   const model = $('model').value;
-  
+
   // Clear previous results and show status
   $('onboarding-panel').classList.add('hidden');
   $('status').classList.remove('hidden');
@@ -143,37 +143,38 @@ async function startWebSocketStream() {
 
   const loc = window.location;
   const wsProtocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${wsProtocol}//${loc.host}/ws/stt?language-code=${language}&model=${encodeURIComponent(model)}&mode=transcribe&sample_rate=16000&vad_signals=true&flush_signal=false&input_audio_codec=pcm_s16le&binary_audio=1&call_code=frontend-session-${Date.now()}`;
-  
+  const diarizeVal = $('diarize').value;
+  const wsUrl = `${wsProtocol}//${loc.host}/ws/stt?language-code=${language}&model=${encodeURIComponent(model)}&mode=transcribe&sample_rate=16000&vad_signals=true&flush_signal=false&input_audio_codec=pcm_s16le&binary_audio=1&diarize=${diarizeVal}&call_code=frontend-session-${Date.now()}`;
+
   ws = new WebSocket(wsUrl);
-  
+
   ws.onopen = async () => {
     $('stage').textContent = 'Streaming Live';
-    
+
     try {
       // Start microphone recording and audio context
       audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
       const source = audioContext.createMediaStreamSource(audioStream);
-      
+
       // Create script processor for 16kHz mono audio
       audioProcessor = audioContext.createScriptProcessor(scriptBufferSize, 1, 1);
       source.connect(audioProcessor);
       audioProcessor.connect(audioContext.destination);
-      
+
       const sampleRate = 16000;
       const targetSamples = chunkMs > 0 ? Math.round(sampleRate * (chunkMs / 1000)) : 0;
       let sampleBuffer = [];
-      
+
       audioProcessor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
-        
+
         if (targetSamples > 0) {
           // Accumulate samples for exact-size chunking
           for (let i = 0; i < inputData.length; i++) {
             sampleBuffer.push(inputData[i]);
           }
-          
+
           while (sampleBuffer.length >= targetSamples) {
             const chunk = sampleBuffer.splice(0, targetSamples);
             const pcm16 = new Int16Array(chunk.length);
@@ -216,37 +217,42 @@ async function startWebSocketStream() {
     if (data.event === 'transcript') {
       const formattedText = data.text ? data.text.trim() : '';
       if (formattedText) {
-        const speakerClass = data.speaker === 'customer' ? 'speaker-customer' : 'speaker-agent';
+        const isDiarize = data.diarize !== false;
+        const speakerClass = isDiarize ? (data.speaker === 'customer' ? 'speaker-customer' : 'speaker-agent') : 'flat-turn';
         const speakerName = data.speaker === 'customer' ? 'Customer' : 'Agent';
         const elapsedSinceStart = liveStartTime ? (Date.now() - liveStartTime) / 1000 : 0;
         const latencySec = elapsedSinceStart - Number(data.end);
         const latencyMs = Math.max(0, Math.round(latencySec * 1000));
-        
+
         $('diag-latency').textContent = `${latencyMs}ms`;
-        
+
         const timeRange = `${Number(data.start).toFixed(2)}–${Number(data.end).toFixed(2)}s (latency: ${latencyMs}ms)`;
-        
+
         const turnDiv = document.getElementById('live-transcript');
         if (turnDiv) {
           turnDiv.className = `turn ${speakerClass}`;
+          
+          const headerHtml = isDiarize ? `
+            <div class="msg-header">
+              <strong>${esc(speakerName)}</strong>
+              <span>${timeRange}</span>
+            </div>` : '';
+          
           turnDiv.innerHTML = `
             <div class="msg-bubble">
-              <div class="msg-header">
-                <strong>${esc(speakerName)}</strong>
-                <span>${timeRange}</span>
-              </div>
+              ${headerHtml}
               <div class="msg-content">
                 <p>${esc(formattedText)}</p>
               </div>
             </div>
           `;
-          
+
           // If final, create a new live transcript container and move on
           if (data.final) {
             turnDiv.removeAttribute('id');
             const newLiveDiv = document.createElement('div');
             newLiveDiv.id = 'live-transcript';
-            newLiveDiv.className = 'turn speaker-customer';
+            newLiveDiv.className = `turn ${isDiarize ? 'speaker-customer' : 'flat-turn'}`;
             newLiveDiv.innerHTML = '<em>Listening...</em>';
             $('turns').appendChild(newLiveDiv);
           }
@@ -302,7 +308,7 @@ $('record').onclick = async () => {
   const mode = $('stream-mode').value;
   $('record').disabled = true;
   $('stop').disabled = false;
-  
+
   if (mode === 'websocket') {
     $('mute').disabled = false;
     isMuted = false;
@@ -324,7 +330,7 @@ $('stop').onclick = () => {
   $('record').disabled = false;
   $('stop').disabled = true;
   $('mute').disabled = true;
-  
+
   if (mode === 'websocket') {
     stopWebSocketStream();
   } else if (recorder) {
@@ -367,6 +373,7 @@ function options(fd) {
   fd.append('chunk_ms', $('chunk').value);
   fd.append('itn_backend', $('itn').value);
   fd.append('model', $('model').value);
+  fd.append('diarize', $('diarize').value);
   [['name', 'bias-name'], ['institute_name', 'bias-institute'], ['total_due', 'bias-amount'], ['due_date', 'bias-date']].forEach(([field, id]) => {
     const v = $(id).value.trim();
     if (v) fd.append(field, v);
@@ -416,29 +423,32 @@ function spanList(spans) {
   return `<details style="border:none; margin:0; padding:0;"><summary style="font-size:10px; font-weight:700; color:var(--text-light); margin-top:4px;">${spans.length} ITN span${spans.length === 1 ? '' : 's'}</summary><div class="spans" style="display:grid; gap:4px; margin-top:4px;">${spans.map(s => `<code style="display:block; font-size:10px; background:#f4f4f2; padding:4px; border-radius:4px;">${esc(s.raw)} → ${esc(s.canonical)} <small style="color:var(--text-light);">${esc(s.cls)} · ${esc(s.rule_id)}</small></code>`).join('')}</div></details>`;
 }
 
-function turnHtml(t, backend) {
+function turnHtml(t, backend, diarize = true) {
   const normalized = t.canonical_text ?? t.text ?? '';
   const raw = t.text ?? '';
   const changed = normalized !== raw;
-  
-  const speakerClass = t.speaker === 'customer' ? 'speaker-customer' : 'speaker-agent';
+
+  const speakerClass = diarize ? (t.speaker === 'customer' ? 'speaker-customer' : 'speaker-agent') : 'flat-turn';
   const speakerName = t.speaker === 'customer' ? 'Customer' : 'Agent';
   const timeRange = `${Number(t.start_sec).toFixed(2)}–${Number(t.end_sec).toFixed(2)}s`;
-  
+
   const rawASR = changed ? `<p class="raw-asr-text"><small style="font-weight:700; font-size:10px;">Raw ASR: </small>${esc(raw)}</p>` : '';
   const compare = backend === 'compare' ? `
     <div class="compare" style="margin-top:8px; display:grid; grid-template-columns:1fr 1fr; gap:8px;">
       <div style="background:#f7f7f5; padding:6px; border-radius:6px;"><small style="font-size:9px; color:var(--text-light); font-weight:800; text-transform:uppercase;">Custom</small><p style="font-size:12px; margin-top:2px;">${esc(t.custom_canonical_text ?? normalized)}</p></div>
       <div style="background:#f7f7f5; padding:6px; border-radius:6px;"><small style="font-size:9px; color:var(--text-light); font-weight:800; text-transform:uppercase;">NeMo</small><p style="font-size:12px; margin-top:2px;">${esc(t.nemo_canonical_text ?? raw)}</p></div>
     </div>` : '';
-    
-  return `
-    <div class="turn ${speakerClass}">
-      <div class="msg-bubble">
+
+  const headerHtml = diarize ? `
         <div class="msg-header">
           <strong>${esc(speakerName)}</strong>
           <span>${timeRange}</span>
-        </div>
+        </div>` : '';
+
+  return `
+    <div class="turn ${speakerClass}">
+      <div class="msg-bubble">
+        ${headerHtml}
         <div class="msg-content">
           <p>${esc(normalized)}</p>
           ${rawASR}
@@ -470,14 +480,14 @@ function show(r) {
   $('result').classList.remove('hidden');
   $('original').src = r.original_url;
   $('denoised').src = r.denoised_url;
-  
+
   // Show audio players for batch/file modes
   if ($('stream-mode').value === 'batch') {
     $('audio-players-container').classList.remove('hidden');
   } else {
     $('audio-players-container').classList.add('hidden');
   }
-  
+
   // Diagnostics update
   if (r.metrics) {
     if (r.metrics.duration_seconds !== undefined) {
@@ -501,8 +511,8 @@ function show(r) {
       </div>
     </div>
   `;
-  
-  $('turns').innerHTML = r.turns.filter(t => (t.canonical_text ?? t.text ?? '').trim()).map(t => turnHtml(t, r.itn_backend || 'custom')).join('');
+
+  $('turns').innerHTML = r.turns.filter(t => (t.canonical_text ?? t.text ?? '').trim()).map(t => turnHtml(t, r.itn_backend || 'custom', r.diarize !== false)).join('');
 }
 
 let evaluationData = null;
@@ -551,15 +561,15 @@ async function submitBatchFiles(files) {
   $('status').classList.add('hidden');
   $('result').classList.add('hidden');
   $('batch-jobs-panel').classList.remove('hidden');
-  
+
   $('download-csv-btn').disabled = true;
   $('batch-stage').textContent = 'Submitting...';
   $('batch-percent').textContent = '0%';
   $('batch-progress').value = 0;
-  
+
   const tbody = $('batch-files-tbody');
   tbody.innerHTML = '';
-  
+
   const fileTracks = files.map((file, idx) => {
     const rowId = `batch-row-${idx}`;
     const tr = document.createElement('tr');
@@ -572,7 +582,7 @@ async function submitBatchFiles(files) {
       <td class="batch-file-preview" style="padding: 12px 15px; color: var(--text-light); font-style: italic;">Waiting...</td>
     `;
     tbody.appendChild(tr);
-    
+
     return {
       file: file,
       rowId: rowId,
@@ -581,10 +591,11 @@ async function submitBatchFiles(files) {
       stage: 'queued',
       progress: 0,
       transcript: '',
+      metrics: null,
       error: ''
     };
   });
-  
+
   for (let track of fileTracks) {
     const fd = options(new FormData());
     fd.append('file', track.file);
@@ -602,29 +613,62 @@ async function submitBatchFiles(files) {
       updateBatchRow(track);
     }
   }
-  
+
   pollBatch(fileTracks);
 }
 
 function updateBatchRow(track) {
   const row = $(track.rowId);
   if (!row) return;
-  
+
   const stageCell = row.querySelector('.batch-file-stage');
   const progressCell = row.querySelector('.batch-file-progress');
   const previewCell = row.querySelector('.batch-file-preview');
-  
+
   stageCell.textContent = track.stage;
   progressCell.textContent = track.progress + '%';
-  
+
   if (track.status === 'complete') {
     stageCell.innerHTML = `<span style="color: #10b981; font-weight: 600;">Complete</span>`;
     const cleanUrl = `/api/jobs/${track.jobId}/audio/normalized`;
     const previewText = track.transcript ? track.transcript.substring(0, 80) + '...' : 'Empty transcript';
+    
+    // Step latency breakdown rendering
+    let latencyHtml = '';
+    if (track.metrics) {
+      const parts = [];
+      if (track.metrics.normalize_seconds !== undefined) {
+        parts.push(`<span>Normalize: <strong>${(track.metrics.normalize_seconds * 1000).toFixed(0)}ms</strong></span>`);
+      }
+      if (track.metrics.denoise_seconds) {
+        parts.push(`<span>Denoise: <strong>${(track.metrics.denoise_seconds * 1000).toFixed(0)}ms</strong></span>`);
+      }
+      if (track.metrics.diarization_seconds) {
+        parts.push(`<span>Diarize: <strong>${(track.metrics.diarization_seconds * 1000).toFixed(0)}ms</strong></span>`);
+      }
+      if (track.metrics.asr_seconds !== undefined) {
+        parts.push(`<span>ASR: <strong>${(track.metrics.asr_seconds * 1000).toFixed(0)}ms</strong></span>`);
+      }
+      if (track.metrics.total_seconds !== undefined) {
+        parts.push(`<span>Total: <strong>${(track.metrics.total_seconds * 1000).toFixed(0)}ms</strong></span>`);
+      }
+      
+      if (parts.length > 0) {
+        latencyHtml = `
+          <div class="batch-latency-breakdown" style="display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; margin-top: 6px; color: var(--text-light); background: rgba(0,0,0,0.01); padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(0,0,0,0.03); width: fit-content;">
+            ${parts.join(' <span style="color: #e5e7eb;">|</span> ')}
+          </div>
+        `;
+      }
+    }
+
     previewCell.innerHTML = `
       <div style="display: flex; flex-direction: column; gap: 4px;">
         <span style="color: var(--text-dark);">${esc(previewText)}</span>
-        <a href="${cleanUrl}" target="_blank" style="font-size: 11px; color: var(--color-primary, #6366f1); font-weight: 600; text-decoration: none;">🔊 Open Audio</a>
+        <div style="display: flex; gap: 10px; align-items: center;">
+          <a href="${cleanUrl}" target="_blank" style="font-size: 11px; color: var(--color-primary, #6366f1); font-weight: 600; text-decoration: none;">🔊 Open Audio</a>
+        </div>
+        ${latencyHtml}
       </div>
     `;
   } else if (track.status === 'failed') {
@@ -637,38 +681,39 @@ function updateBatchRow(track) {
 
 async function pollBatch(fileTracks) {
   let allDone = false;
-  
+
   while (!allDone) {
     allDone = true;
     let completedCount = 0;
     let totalProgress = 0;
-    
+
     for (let track of fileTracks) {
       if (track.status === 'complete' || track.status === 'failed') {
         completedCount++;
         totalProgress += 100;
         continue;
       }
-      
+
       if (!track.jobId) {
         allDone = false;
         continue;
       }
-      
+
       try {
         const job = await fetch('/api/jobs/' + track.jobId).then(r => r.json());
         track.status = job.status;
         track.stage = job.stage;
         track.progress = job.progress;
-        
+
         if (job.status === 'complete') {
           track.transcript = job.result ? (job.result.transcript || '') : '';
+          track.metrics = job.result ? job.result.metrics : null;
         } else if (job.status === 'failed') {
           track.error = job.error || 'Unknown ASR error';
         }
-        
+
         updateBatchRow(track);
-        
+
         if (track.status !== 'complete' && track.status !== 'failed') {
           allDone = false;
         } else {
@@ -684,22 +729,42 @@ async function pollBatch(fileTracks) {
         totalProgress += 100;
       }
     }
-    
+
     const overallProgress = Math.round(totalProgress / fileTracks.length);
     $('batch-progress').value = overallProgress;
     $('batch-percent').textContent = overallProgress + '%';
     $('batch-stage').textContent = allDone ? 'Complete' : `Processing (${completedCount}/${fileTracks.length} done)`;
-    
+
     if (!allDone) {
       await new Promise(resolve => setTimeout(resolve, 1500));
     }
   }
-  
-  const jobIds = fileTracks.filter(t => t.jobId).map(t => t.jobId).join(',');
-  if (jobIds) {
+
+  const jobIds = fileTracks.filter(t => t.jobId).map(t => t.jobId);
+  if (jobIds.length > 0) {
     $('download-csv-btn').disabled = false;
-    $('download-csv-btn').onclick = () => {
-      window.location.href = `/api/jobs/batch/csv?job_ids=${encodeURIComponent(jobIds)}`;
+    $('download-csv-btn').onclick = async () => {
+      try {
+        const response = await fetch('/api/jobs/batch/csv', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ job_ids: jobIds })
+        });
+        if (!response.ok) throw new Error('Failed to generate CSV');
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'batch_transcript.csv';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+      } catch (err) {
+        alert('Error downloading CSV: ' + err.message);
+      }
     };
   }
 }

@@ -9,7 +9,7 @@ import base64
 from datetime import datetime
 from pathlib import Path
 from fastapi import WebSocket, WebSocketDisconnect
-from utils.audio_processing import write_pcm16_wav, slice_wav, normalize_audio
+from utils.audio_processing import write_pcm16_wav, slice_wav, normalize_audio, read_pcm16_wav
 from silero_vad import get_speech_timestamps, read_audio
 from utils.pipeline import resolve_model
 
@@ -71,6 +71,40 @@ async def handle_websocket_stream(
     is_diarize = diarize.lower() == "true"
     is_flush = flush_signal.lower() == "true"
     
+    async def _detect_language_if_auto(wav_path: Path):
+        nonlocal language
+        if language != "auto":
+            return language
+        
+        if store.lid_service is not None:
+            try:
+                pcm, sr = await asyncio.to_thread(read_pcm16_wav, wav_path)
+                fallback_langs = {"as", "bn", "brx", "doi", "gu", "hi", "kn", "kok", "ks", "mai", "ml", "mni", "mr", "ne", "or", "pa", "sa", "sat", "sd", "ta", "te", "ur"}
+                supported = getattr(store.asr_indic, "supported_languages", fallback_langs) if store.asr_indic is not None else fallback_langs
+                
+                res = await asyncio.to_thread(store.lid_service.identify_turn_language, pcm, sr, supported)
+                if res.confidence >= 0.70 and res.language:
+                    detected = res.language
+                else:
+                    detected = "hi"
+                
+                locale_map = {"hi": "hi-IN", "te": "te-IN", "ta": "ta-IN", "mr": "mr-IN"}
+                language = locale_map.get(detected, f"{detected}-IN")
+                log_event(f"[LID] Resolved 'auto' language to: {language} (confidence: {res.confidence:.2f})")
+                
+                # Send the detection event to client
+                await send_json_logged({
+                    "event": "language_detected",
+                    "language_code": language,
+                    "confidence": res.confidence
+                })
+            except Exception as e:
+                log_event(f"[LID] Auto-LID detection failed: {e}. Defaulting to hi-IN.")
+                language = "hi-IN"
+        else:
+            language = "hi-IN"
+        return language
+
     # Pre-load/ensure models
     store._ensure_models()
 
@@ -205,6 +239,8 @@ async def handle_websocket_stream(
                                 print(f"Flush Denoise error: {e}")
                         
                         try:
+                            if language == "auto":
+                                await _detect_language_if_auto(transcribe_source)
                             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                             log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s on flush")
                             
@@ -277,6 +313,8 @@ async def handle_websocket_stream(
                                 print(f"Auto-Flush Denoise error: {e}")
                         
                         try:
+                            if language == "auto":
+                                await _detect_language_if_auto(transcribe_source)
                             log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s on auto-flush")
                             t_start = time.time()
                             text = await get_asr_worker().transcribe_async(transcribe_source, language=language)
@@ -351,7 +389,7 @@ async def handle_websocket_stream(
                     wav = await asyncio.to_thread(read_audio, str(vad_wav_path), sampling_rate=16000)
                     spans = await asyncio.to_thread(
                         get_speech_timestamps,
-                        wav, store.diarizer._silero(), sampling_rate=16000,
+                        wav, store._silero(), sampling_rate=16000,
                         threshold=0.4, min_silence_duration_ms=400, speech_pad_ms=100,
                         return_seconds=True
                     )
@@ -371,6 +409,8 @@ async def handle_websocket_stream(
                                 await asyncio.to_thread(slice_wav, transcribe_source, turn_wav_path, span_start, span_end)
                                 
                                 # Transcribe the active turn
+                                if language == "auto":
+                                    await _detect_language_if_auto(turn_wav_path)
                                 now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                                 log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting turn slice: {span_start:.2f}s - {span_end:.2f}s")
                                 t_start = time.time()
@@ -396,6 +436,7 @@ async def handle_websocket_stream(
                                     "end": span_end,
                                     "speaker": speaker,
                                     "final": is_final,
+                                    "diarize": is_diarize,
                                     "ts_ms": int(time.time() * 1000)
                                 })
                             else:
@@ -422,6 +463,8 @@ async def handle_websocket_stream(
             else:
                 # Direct transcript mode: transcribe the entire accumulated audio
                 try:
+                    if language == "auto":
+                        await _detect_language_if_auto(transcribe_source)
                     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                     log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s")
                     t_start = time.time()
@@ -439,6 +482,7 @@ async def handle_websocket_stream(
                             "end": duration,
                             "speaker": "Speaker",
                             "final": False,
+                            "diarize": is_diarize,
                             "ts_ms": int(time.time() * 1000)
                         })
                     else:
@@ -481,6 +525,7 @@ async def handle_websocket_stream(
                     "end": final_duration,
                     "speaker": "Speaker",
                     "final": True,
+                    "diarize": is_diarize,
                     "ts_ms": int(time.time() * 1000)
                 })
         except Exception:

@@ -501,37 +501,98 @@ class IndicStreamingASR:
             sample_rate = f.getframerate()
         
         lang = language.split("-", 1)[0] if language and language != "auto" else "auto"
-        result = self.worker.transcribe_pcm16(
-            pcm16le=pcm16le,
-            sample_rate=sample_rate,
-            decoder=self.worker.default_decoder,
-            language=lang,
-            session_id=None,
-            utterance_id=None,
-            mode="final",
-        )
-        return result.text
+        pcm_chunks = split_audio_on_silence(pcm16le, sample_rate)
+        texts = []
+        for chunk in pcm_chunks:
+            result = self.worker.transcribe_pcm16(
+                pcm16le=chunk,
+                sample_rate=sample_rate,
+                decoder=self.worker.default_decoder,
+                language=lang,
+                session_id=None,
+                utterance_id=None,
+                mode="final",
+            )
+            if result.text.strip():
+                texts.append(result.text.strip())
+        return " ".join(texts)
 
     def transcribe_with_lang(self, audio_path: Path, language="hi", chunk_ms=None) -> tuple[str, str]:
         import wave
+        import logging as _log
+        _logger = _log.getLogger(__name__)
         with wave.open(str(audio_path), "rb") as f:
             pcm16le = f.readframes(f.getnframes())
             sample_rate = f.getframerate()
         
         lang = language.split("-", 1)[0] if language and language != "auto" else "auto"
-        result = self.worker.transcribe_pcm16(
-            pcm16le=pcm16le,
-            sample_rate=sample_rate,
-            decoder=self.worker.default_decoder,
-            language=lang,
-            session_id=None,
-            utterance_id=None,
-            mode="final",
-        )
+        audio_dur_sec = len(pcm16le) / (sample_rate * 2)
+        pcm_chunks = split_audio_on_silence(pcm16le, sample_rate)
+        _logger.warning("[CHUNK_DEBUG] audio=%.1fs sample_rate=%d num_chunks=%d lang=%s",
+                        audio_dur_sec, sample_rate, len(pcm_chunks), lang)
+        print(f"[CHUNK_DEBUG] audio={audio_dur_sec:.1f}s sample_rate={sample_rate} num_chunks={len(pcm_chunks)} lang={lang}", flush=True)
+        texts = []
+        last_resolved_lang = lang
+        for i, chunk in enumerate(pcm_chunks):
+            chunk_dur = len(chunk) / (sample_rate * 2)
+            result = self.worker.transcribe_pcm16(
+                pcm16le=chunk,
+                sample_rate=sample_rate,
+                decoder=self.worker.default_decoder,
+                language=lang,
+                session_id=None,
+                utterance_id=None,
+                mode="final",
+            )
+            _logger.warning("[CHUNK_DEBUG] chunk=%d/%d dur=%.1fs text_len=%d text=%r",
+                            i+1, len(pcm_chunks), chunk_dur, len(result.text), result.text[:80])
+            print(f"[CHUNK_DEBUG] chunk={i+1}/{len(pcm_chunks)} dur={chunk_dur:.1f}s text={result.text[:80]!r}", flush=True)
+            if result.text.strip():
+                texts.append(result.text.strip())
+            if result.language:
+                last_resolved_lang = result.language
         locale_map = {"hi": "hi-IN", "te": "te-IN", "ta": "ta-IN", "mr": "mr-IN"}
-        resolved_lang = locale_map.get(result.language, result.language)
-        return result.text, resolved_lang
+        resolved_lang = locale_map.get(last_resolved_lang, last_resolved_lang)
+        return " ".join(texts), resolved_lang
 
     async def transcribe_async(self, audio_path: Path, language="hi") -> str:
         return await asyncio.to_thread(self.transcribe, audio_path, language)
+
+
+def split_audio_on_silence(pcm16le: bytes, sample_rate: int, max_chunk_len_sec: float = 30.0) -> list[bytes]:
+    import numpy as np
+    audio = np.frombuffer(pcm16le, dtype=np.int16)
+    max_samples = int(max_chunk_len_sec * sample_rate)
+    if len(audio) <= max_samples:
+        return [pcm16le]
+        
+    chunks = []
+    start = 0
+    search_window = int(5.0 * sample_rate)
+    
+    while start < len(audio):
+        end = start + max_samples
+        if end >= len(audio):
+            chunks.append(audio[start:].tobytes())
+            break
+            
+        search_start = max(start + int(10.0 * sample_rate), end - search_window)
+        search_end = end
+        
+        sub_array = audio[search_start:search_end]
+        block_size = int(0.1 * sample_rate)
+        min_energy = float('inf')
+        best_idx = end
+        
+        for idx in range(search_start, search_end - block_size, block_size):
+            energy = np.mean(np.square(audio[idx:idx + block_size].astype(np.float32)))
+            if energy < min_energy:
+                min_energy = energy
+                best_idx = idx + (block_size // 2)
+                
+        chunks.append(audio[start:best_idx].tobytes())
+        start = best_idx
+        
+    return chunks
+
 

@@ -90,36 +90,5 @@ def slice_wav(source: Path, destination: Path, start_sec: float, end_sec: float)
     start, end = max(0, round(start_sec * sr)), min(audio.size, round(end_sec * sr))
     return write_pcm16_wav(destination, audio[start:end].tobytes(), sr)
 
-class DeepFilterNetDenoiser:
-    def __init__(self):
-        import torch
-        import df.enhance
-        df.enhance.get_device = lambda: torch.device("cpu")
-        from df.enhance import init_df
-        self.torch = torch; self.model, self.state, _ = init_df(); self.lock = threading.Lock()
-        value = getattr(self.state, "sr", lambda: 48000); self.sample_rate = int(value() if callable(value) else value)
-        if self.sample_rate != 48000: raise RuntimeError(f"DeepFilterNet sample rate is {self.sample_rate}, expected 48000")
-    def process(self, pcm: bytes) -> bytes:
-        from df.enhance import enhance
-        audio = np.frombuffer(pcm, dtype="<i2")
-        if not audio.size: return b""
-        tensor = self.torch.from_numpy((audio.astype(np.float32) / 32768.0).reshape(1, -1))
-        with self.lock, self.torch.inference_mode(): cleaned = enhance(self.model, self.state, tensor)
-        return np.clip(cleaned.detach().cpu().numpy().reshape(-1) * 32768, -32768, 32767).astype("<i2").tobytes()
+from .denoise_service import DeepFilterNetDenoiser, AudioPreprocessor
 
-class AudioPreprocessor:
-    """Whole-recording denoising; no VAD, preserving diarization timestamps."""
-    def __init__(self): self.denoiser = DeepFilterNetDenoiser()
-    @staticmethod
-    def _resample(audio: np.ndarray, source_sr: int, target_sr: int) -> np.ndarray:
-        if source_sr == target_sr: return audio
-        from scipy.signal import resample_poly
-        d = gcd(source_sr, target_sr)
-        return np.clip(np.rint(resample_poly(audio.astype(np.float32), target_sr // d, source_sr // d)), -32768, 32767).astype("<i2")
-    def denoise_wav(self, source: Path, destination: Path) -> Path:
-        pcm, sr = read_pcm16_wav(source); original = np.frombuffer(pcm, dtype="<i2")
-        audio48 = self._resample(original, sr, self.denoiser.sample_rate)
-        clean48 = np.frombuffer(self.denoiser.process(audio48.tobytes()), dtype="<i2")
-        clean = self._resample(clean48, self.denoiser.sample_rate, sr)
-        if clean.size < original.size: clean = np.pad(clean, (0, original.size - clean.size))
-        return write_pcm16_wav(destination, clean[:original.size].tobytes(), sr)

@@ -43,6 +43,7 @@
           <select id="language">
             <option value="hi-IN">Hindi (hi-IN)</option>
             <option value="auto">Automatic Detection</option>
+            <option value="majority">Majority Voting (First 10 turns)</option>
             <option value="en-US">English (en-US)</option>
           </select>
         </div>
@@ -78,6 +79,14 @@
               <select id="vad">
                 <option value="true">Silero VAD (Enabled)</option>
                 <option value="false">Disabled</option>
+              </select>
+            </div>
+            
+            <div class="control-group">
+              <label for="diarize">Speaker Diarization</label>
+              <select id="diarize">
+                <option value="true" selected>Enabled (Split Speakers)</option>
+                <option value="false">Disabled (Raw / Flat Transcript)</option>
               </select>
             </div>
             

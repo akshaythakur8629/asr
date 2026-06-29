@@ -66,21 +66,21 @@ def _config(manifest: Path, output: Path, device: str, max_speakers: int):
     from omegaconf import OmegaConf
     return OmegaConf.create({"name":"ClusterDiarizer","num_workers":1,"sample_rate":16000,"batch_size":64,"device":device,"verbose":False,"diarizer":{"manifest_filepath":str(manifest),"out_dir":str(output),"oracle_vad":False,"collar":0.25,"ignore_overlap":True,"vad":{"model_path":"vad_multilingual_marblenet","external_vad_manifest":None,"parameters":{"window_length_in_sec":0.15,"shift_length_in_sec":0.01,"smoothing":"median","overlap":0.5,"onset":0.1,"offset":0.1,"pad_onset":0.1,"pad_offset":0.0,"min_duration_on":0.0,"min_duration_off":0.2,"filter_speech_first":True}},"speaker_embeddings":{"model_path":"titanet_large","parameters":{"window_length_in_sec":[1.5,1.25,1.0,0.75,0.5],"shift_length_in_sec":[0.75,0.625,0.5,0.375,0.25],"multiscale_weights":[1,1,1,1,1],"save_embeddings":False}},"clustering":{"parameters":{"oracle_num_speakers":False,"max_num_speakers":max_speakers,"enhanced_count_thres":80,"max_rp_threshold":0.25,"sparse_search_volume":30,"maj_vote_spk_count":False,"chunk_cluster_count":50,"embeddings_per_chunk":10000}}}})
 
+from .vad_service import SileroVADService
+
 class NemoTelephonyDiarizer:
-    def __init__(self, device="cuda:1", max_speakers=2): self.device=device; self.max_speakers=max_speakers; self._vad_model=None
+    def __init__(self, device="cuda:1", max_speakers=2):
+        self.device = device
+        self.max_speakers = max_speakers
+        self._vad_service = SileroVADService()
 
     def _silero(self):
         """Lazily load Silero VAD v5 once. Light enough to run on CPU; gives crisp telephony boundaries."""
-        if self._vad_model is None:
-            from silero_vad import load_silero_vad
-            self._vad_model = load_silero_vad()
-        return self._vad_model
+        return self._vad_service.get_model()
 
     def _vad_turns(self, channel: Path) -> list[SpeakerTurn]:
         """Segment one channel into speech turns with Silero VAD (speaker is assigned later by channel)."""
-        from silero_vad import get_speech_timestamps, read_audio
-        wav = read_audio(str(channel), sampling_rate=16000)
-        spans = get_speech_timestamps(wav, self._silero(), sampling_rate=16000, return_seconds=True, min_silence_duration_ms=200, speech_pad_ms=100)
+        spans = self._vad_service.get_speech_turns(channel, min_silence_duration_ms=200, speech_pad_ms=100)
         return [SpeakerTurn("speaker", float(s["start"]), float(s["end"])) for s in spans]
 
     def diarize(self, audio: Path, output: Path) -> list[SpeakerTurn]:

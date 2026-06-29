@@ -199,23 +199,23 @@ def _biasing_context(name,institute_name,total_due,due_date):
     ctx={k:v for k,v in {"name":name,"institute_name":institute_name,"total_due":total_due,"due_date":due_date}.items() if v}
     return ctx or None
 @app.post("/api/jobs")
-def create_job(file:UploadFile=File(...),language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),name:str=Form(None),institute_name:str=Form(None),total_due:str=Form(None),due_date:str=Form(None),model:str=Form("sarga:v1")):
+def create_job(file:UploadFile=File(...),language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),name:str=Form(None),institute_name:str=Form(None),total_due:str=Form(None),due_date:str=Form(None),model:str=Form("sarga:v1"),diarize:bool=Form(True)):
     if chunk_ms not in {80,160,320,560,1120}:raise HTTPException(400,"Unsupported chunk size")
     if itn_backend not in {"custom","nemo","compare"}:raise HTTPException(400,"Unsupported ITN backend")
     model = resolve_model(model)
     if model not in {"sarga:v1", "credresolve:v1"}:raise HTTPException(400,"Unsupported model name")
     with tempfile.NamedTemporaryFile(delete=False,suffix=Path(file.filename or "audio.webm").suffix) as temp:
         shutil.copyfileobj(file.file,temp); path=Path(temp.name)
-    try:return store.submit(path,file.filename or "recording.webm",language,chunk_ms,itn_backend,_biasing_context(name,institute_name,total_due,due_date),model)
+    try:return store.submit(path,file.filename or "recording.webm",language,chunk_ms,itn_backend,_biasing_context(name,institute_name,total_due,due_date),model,diarize)
     finally:path.unlink(missing_ok=True)
 @app.post("/api/jobs/sample/{filename}")
-def create_sample_job(filename:str,language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),name:str=Form(None),institute_name:str=Form(None),total_due:str=Form(None),due_date:str=Form(None),model:str=Form("sarga:v1")):
+def create_sample_job(filename:str,language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),name:str=Form(None),institute_name:str=Form(None),total_due:str=Form(None),due_date:str=Form(None),model:str=Form("sarga:v1"),diarize:bool=Form(True)):
     source=(ROOT/"recording"/Path(filename).name)
     if not source.exists():raise HTTPException(404,"Sample not found")
     if itn_backend not in {"custom","nemo","compare"}:raise HTTPException(400,"Unsupported ITN backend")
     model = resolve_model(model)
     if model not in {"sarga:v1", "credresolve:v1"}:raise HTTPException(400,"Unsupported model name")
-    return store.submit(source,source.name,language,chunk_ms,itn_backend,_biasing_context(name,institute_name,total_due,due_date),model)
+    return store.submit(source,source.name,language,chunk_ms,itn_backend,_biasing_context(name,institute_name,total_due,due_date),model,diarize)
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id:str):
     job=store.public(job_id)
@@ -288,6 +288,7 @@ async def ws_stt(
     flush_signal = websocket.query_params.get("flush_signal") or "false"
     
     model = websocket.query_params.get("model") or "sarga:v1"
+    diarize = websocket.query_params.get("diarize") or "false"
     
     # Run in Immediate Mode (chunk_ms=0, denoise=true)
     await handle_websocket_stream(
@@ -296,7 +297,7 @@ async def ws_stt(
         language=language,
         denoise="true",
         vad=vad,
-        diarize="false",
+        diarize=diarize,
         input_rate=input_rate,
         chunk_ms=0,
         call_code=call_code,
@@ -310,6 +311,12 @@ def _make_public_audio_link(request: Request, job_id: str) -> str:
     if "localhost" in base or "127.0.0.1" in base or ":8000" in base:
         base = "http://13.234.132.26:8002"
     return f"{base}/api/jobs/{job_id}/audio/normalized"
+
+
+from pydantic import BaseModel
+
+class CSVRequest(BaseModel):
+    job_ids: list[str]
 
 
 @app.get("/api/jobs/batch/csv")
@@ -343,6 +350,36 @@ def get_batch_csv(job_ids: str, request: Request):
     )
 
 
+@app.post("/api/jobs/batch/csv")
+def get_batch_csv_post(request: Request, body: CSVRequest):
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["filename", "audio_link", "language_id", "transcript"])
+    for jid in body.job_ids:
+        job = store.public(jid)
+        if job:
+            filename = job.get("filename", "audio.wav")
+            status = job.get("status")
+            language_id = "unknown"
+            if status == "complete":
+                result = job.get("result") or {}
+                transcript = result.get("transcript") or ""
+                language_id = result.get("language_id") or job.get("language") or "hi-IN"
+            elif status == "failed":
+                transcript = f"ERROR: {job.get('error')}"
+                language_id = job.get("language") or "hi-IN"
+            else:
+                transcript = f"STATUS: {status}"
+                language_id = job.get("language") or "hi-IN"
+            audio_link = _make_public_audio_link(request, jid)
+            writer.writerow([filename, audio_link, language_id, transcript])
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=batch_transcript.csv"}
+    )
+
+
 @app.post("/api/jobs/batch")
 async def create_batch_job(
     request: Request,
@@ -350,7 +387,8 @@ async def create_batch_job(
     language: str = Form("hi-IN"),
     chunk_ms: int = Form(1120),
     itn_backend: str = Form("custom"),
-    model: str = Form("sarga:v1")
+    model: str = Form("sarga:v1"),
+    diarize: bool = Form(True)
 ):
     if chunk_ms not in {80, 160, 320, 560, 1120}:
         raise HTTPException(400, "Unsupported chunk size")
@@ -374,7 +412,8 @@ async def create_batch_job(
                 chunk_ms,
                 itn_backend,
                 None,
-                model
+                model,
+                diarize
             )
             job_ids.append((job["id"], file.filename or "recording.webm"))
         finally:

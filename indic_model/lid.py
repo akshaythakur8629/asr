@@ -28,6 +28,38 @@ _ALIAS_MAP = {
     "marathi": "mr",
     "mar": "mr",
     "mr-in": "mr",
+    "gujarati": "gu",
+    "guj": "gu",
+    "gu-in": "gu",
+    "kannada": "kn",
+    "kan": "kn",
+    "kn-in": "kn",
+    "malayalam": "ml",
+    "mal": "ml",
+    "ml-in": "ml",
+    "punjabi": "pa",
+    "pan": "pa",
+    "pa-in": "pa",
+    "bengali": "bn",
+    "ben": "bn",
+    "bn-in": "bn",
+    "urdu": "ur",
+    "urd": "ur",
+    "ur-in": "ur",
+    "odia": "or",
+    "or-in": "or",
+    "assamese": "as",
+    "as-in": "as",
+    "konkani": "kok",
+    "kok-in": "kok",
+    "sanskrit": "sa",
+    "sa-in": "sa",
+    "nepali": "ne",
+    "nep": "ne",
+    "ne-in": "ne",
+    "sindhi": "sd",
+    "snd": "sd",
+    "sd-in": "sd",
 }
 
 
@@ -107,9 +139,17 @@ class LanguageDetector:
 
         signal = torch.from_numpy(audio_np).to(self.device).unsqueeze(0)
         prediction = self.classifier.classify_batch(signal)
+        score = prediction[1]
+        confidence = float(torch.exp(score).item())
+
         raw_label = str(prediction[3][0])
         normalized_label = self.normalize_language_label(raw_label)
-        language = self.map_to_supported_code(raw_label, supported_languages)
+        
+        # Option 3: confidence threshold of 0.70
+        if confidence >= 0.70:
+            language = self.map_to_supported_code(raw_label, supported_languages)
+        else:
+            language = None
 
         return DetectionResult(
             language=language,
