@@ -15,13 +15,15 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request, Res
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from utils.biasing_context import is_hindi
 from utils.pipeline import JobStore, resolve_model
 from streaming_handler import log_event
 import uuid
 import time
 from datetime import datetime
 from starlette.concurrency import iterate_in_threadpool
+
+def is_hindi(language: str) -> bool:
+    return (language or "").strip().lower().startswith("hi")
 
 def deprecated(func):
     import functools
@@ -194,28 +196,24 @@ def evaluation(filename:str):
             "brand_hit_biased":sum(r["brand_hit_biased"] for r in compact),
         },
     }
-def _biasing_context(name,institute_name,total_due,due_date):
-    """Bundle optional per-call metadata for Hindi context biasing (None if all blank)."""
-    ctx={k:v for k,v in {"name":name,"institute_name":institute_name,"total_due":total_due,"due_date":due_date}.items() if v}
-    return ctx or None
 @app.post("/api/jobs")
-def create_job(file:UploadFile=File(...),language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),name:str=Form(None),institute_name:str=Form(None),total_due:str=Form(None),due_date:str=Form(None),model:str=Form("sarga:v1"),diarize:bool=Form(True)):
+def create_job(file:UploadFile=File(...),language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),model:str=Form("sarga:v1"),diarize:bool=Form(True),denoise:bool=Form(True)):
     if chunk_ms not in {80,160,320,560,1120}:raise HTTPException(400,"Unsupported chunk size")
-    if itn_backend not in {"custom","nemo","compare"}:raise HTTPException(400,"Unsupported ITN backend")
+    if itn_backend not in {"custom","nemo","compare","none"}:raise HTTPException(400,"Unsupported ITN backend")
     model = resolve_model(model)
     if model not in {"sarga:v1", "credresolve:v1"}:raise HTTPException(400,"Unsupported model name")
     with tempfile.NamedTemporaryFile(delete=False,suffix=Path(file.filename or "audio.webm").suffix) as temp:
         shutil.copyfileobj(file.file,temp); path=Path(temp.name)
-    try:return store.submit(path,file.filename or "recording.webm",language,chunk_ms,itn_backend,_biasing_context(name,institute_name,total_due,due_date),model,diarize)
+    try:return store.submit(path,file.filename or "recording.webm",language,chunk_ms,itn_backend,model,diarize,denoise)
     finally:path.unlink(missing_ok=True)
 @app.post("/api/jobs/sample/{filename}")
-def create_sample_job(filename:str,language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),name:str=Form(None),institute_name:str=Form(None),total_due:str=Form(None),due_date:str=Form(None),model:str=Form("sarga:v1"),diarize:bool=Form(True)):
+def create_sample_job(filename:str,language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),model:str=Form("sarga:v1"),diarize:bool=Form(True),denoise:bool=Form(True)):
     source=(ROOT/"recording"/Path(filename).name)
     if not source.exists():raise HTTPException(404,"Sample not found")
-    if itn_backend not in {"custom","nemo","compare"}:raise HTTPException(400,"Unsupported ITN backend")
+    if itn_backend not in {"custom","nemo","compare","none"}:raise HTTPException(400,"Unsupported ITN backend")
     model = resolve_model(model)
     if model not in {"sarga:v1", "credresolve:v1"}:raise HTTPException(400,"Unsupported model name")
-    return store.submit(source,source.name,language,chunk_ms,itn_backend,_biasing_context(name,institute_name,total_due,due_date),model,diarize)
+    return store.submit(source,source.name,language,chunk_ms,itn_backend,model,diarize,denoise)
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id:str):
     job=store.public(job_id)
@@ -249,6 +247,8 @@ async def websocket_stream(
     if not flush_signal or flush_signal == "false":
         flush_signal = websocket.query_params.get("flush_signal") or "false"
     model = websocket.query_params.get("model") or "sarga:v1"
+    itn = websocket.query_params.get("itn") or "false"
+    itn_backend = websocket.query_params.get("itn_backend") or "custom"
     await handle_websocket_stream(
         websocket=websocket,
         store=store,
@@ -260,7 +260,9 @@ async def websocket_stream(
         chunk_ms=chunk_ms,
         call_code=call_code,
         flush_signal=flush_signal,
-        model=model
+        model=model,
+        itn=itn,
+        itn_backend=itn_backend
     )
 
 @app.websocket("/ws/stt")
@@ -289,6 +291,8 @@ async def ws_stt(
     
     model = websocket.query_params.get("model") or "sarga:v1"
     diarize = websocket.query_params.get("diarize") or "false"
+    itn = websocket.query_params.get("itn") or "false"
+    itn_backend = websocket.query_params.get("itn_backend") or "custom"
     
     # Run in Immediate Mode (chunk_ms=0, denoise=true)
     await handle_websocket_stream(
@@ -302,7 +306,9 @@ async def ws_stt(
         chunk_ms=0,
         call_code=call_code,
         flush_signal=flush_signal,
-        model=model
+        model=model,
+        itn=itn,
+        itn_backend=itn_backend
     )
 
 
@@ -388,16 +394,17 @@ async def create_batch_job(
     chunk_ms: int = Form(1120),
     itn_backend: str = Form("custom"),
     model: str = Form("sarga:v1"),
-    diarize: bool = Form(True)
+    diarize: bool = Form(True),
+    denoise: bool = Form(True)
 ):
     if chunk_ms not in {80, 160, 320, 560, 1120}:
         raise HTTPException(400, "Unsupported chunk size")
-    if itn_backend not in {"custom", "nemo", "compare"}:
+    if itn_backend not in {"custom", "nemo", "compare", "none"}:
         raise HTTPException(400, "Unsupported ITN backend")
     model = resolve_model(model)
     if model not in {"sarga:v1", "credresolve:v1"}:
         raise HTTPException(400, "Unsupported model name")
-
+ 
     job_ids = []
     for file in files:
         suffix = Path(file.filename or "audio.webm").suffix
@@ -411,9 +418,9 @@ async def create_batch_job(
                 language,
                 chunk_ms,
                 itn_backend,
-                None,
                 model,
-                diarize
+                diarize,
+                denoise
             )
             job_ids.append((job["id"], file.filename or "recording.webm"))
         finally:

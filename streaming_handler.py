@@ -49,7 +49,9 @@ async def handle_websocket_stream(
     chunk_ms: int = 160,
     call_code: str = None,
     flush_signal: str = "false",
-    model: str = "sarga:v1"
+    model: str = "sarga:v1",
+    itn: str = "false",
+    itn_backend: str = "custom"
 ):
     await websocket.accept()
     model = resolve_model(model)
@@ -60,9 +62,9 @@ async def handle_websocket_stream(
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         log_event(f"[{now_str}] [WS] [RES] [Session: {session_id}] Sending: {json.dumps(payload, ensure_ascii=False)}")
         await websocket.send_json(payload)
-
+ 
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-    log_event(f"[{now_str}] [WS] [OPEN] Session {session_id} connected. chunk_ms={chunk_ms}, language={language}, denoise={denoise}, vad={vad}, flush_signal={flush_signal}, model={model}")
+    log_event(f"[{now_str}] [WS] [OPEN] Session {session_id} connected. chunk_ms={chunk_ms}, language={language}, denoise={denoise}, vad={vad}, flush_signal={flush_signal}, model={model}, itn={itn}, itn_backend={itn_backend}")
     session_dir = store.root / f"stream_{session_id}"
     session_dir.mkdir(parents=True, exist_ok=True)
     
@@ -70,10 +72,12 @@ async def handle_websocket_stream(
     is_vad = vad.lower() == "true"
     is_diarize = diarize.lower() == "true"
     is_flush = flush_signal.lower() == "true"
+    is_itn = itn.lower() == "true"
+    is_auto_lid = (language == "auto")
     
     async def _detect_language_if_auto(wav_path: Path):
         nonlocal language
-        if language != "auto":
+        if not is_auto_lid:
             return language
         
         if store.lid_service is not None:
@@ -83,7 +87,7 @@ async def handle_websocket_stream(
                 supported = getattr(store.asr_indic, "supported_languages", fallback_langs) if store.asr_indic is not None else fallback_langs
                 
                 res = await asyncio.to_thread(store.lid_service.identify_turn_language, pcm, sr, supported)
-                if res.confidence >= 0.70 and res.language:
+                if res.language:
                     detected = res.language
                 else:
                     detected = "hi"
@@ -95,7 +99,7 @@ async def handle_websocket_stream(
                 # Send the detection event to client
                 await send_json_logged({
                     "event": "language_detected",
-                    "language_code": language,
+                    "language_code": language.split("-", 1)[0],
                     "confidence": res.confidence
                 })
             except Exception as e:
@@ -239,10 +243,10 @@ async def handle_websocket_stream(
                                 print(f"Flush Denoise error: {e}")
                         
                         try:
-                            if language == "auto":
+                            if is_auto_lid:
                                 await _detect_language_if_auto(transcribe_source)
                             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                            log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s on flush")
+                            log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s on flush, Language: {language}")
                             
                             t_start = time.time()
                             text = await get_asr_worker().transcribe_async(transcribe_source, language=language)
@@ -250,13 +254,17 @@ async def handle_websocket_stream(
                             inference_time_ms = (t_end - t_start) * 1000.0
                             
                             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                            log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {inference_time_ms:.1f}ms)")
+                            log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {inference_time_ms:.1f}ms, Language: {language})")
+                            
+                            if is_itn and text.strip():
+                                from utils.pipeline import _normalize_turn
+                                text = _normalize_turn(text, language, itn_backend).get("canonical_text", text)
                             
                             response_data = {
                                 "type": "data",
                                 "data": {
                                     "transcript": text,
-                                    "language_code": language,
+                                    "language_code": language.split("-", 1)[0],
                                     "metrics": {
                                         "inference_time": round(inference_time_ms, 2)
                                     }
@@ -273,7 +281,7 @@ async def handle_websocket_stream(
                             "type": "data",
                             "data": {
                                 "transcript": "",
-                                "language_code": language,
+                                "language_code": language.split("-", 1)[0],
                                 "metrics": {
                                     "inference_time": 0.0
                                 }
@@ -409,15 +417,18 @@ async def handle_websocket_stream(
                                 await asyncio.to_thread(slice_wav, transcribe_source, turn_wav_path, span_start, span_end)
                                 
                                 # Transcribe the active turn
-                                if language == "auto":
+                                if is_auto_lid:
                                     await _detect_language_if_auto(turn_wav_path)
                                 now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                                log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting turn slice: {span_start:.2f}s - {span_end:.2f}s")
+                                log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting turn slice: {span_start:.2f}s - {span_end:.2f}s, Language: {language}")
                                 t_start = time.time()
                                 text = await get_asr_worker().transcribe_async(turn_wav_path, language=language)
                                 t_end = time.time()
                                 now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                                log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {(t_end - t_start)*1000:.1f}ms)")
+                                log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {(t_end - t_start)*1000:.1f}ms, Language: {language})")
+                                if is_itn and text.strip():
+                                    from utils.pipeline import _normalize_turn
+                                    text = _normalize_turn(text, language, itn_backend).get("canonical_text", text)
                             else:
                                 text = ""
                             
@@ -437,6 +448,7 @@ async def handle_websocket_stream(
                                     "speaker": speaker,
                                     "final": is_final,
                                     "diarize": is_diarize,
+                                    "language_code": language.split("-", 1)[0],
                                     "ts_ms": int(time.time() * 1000)
                                 })
                             else:
@@ -445,7 +457,7 @@ async def handle_websocket_stream(
                                     "type": "data",
                                     "data": {
                                         "transcript": text,
-                                        "language_code": language,
+                                        "language_code": language.split("-", 1)[0],
                                         "metrics": {
                                             "inference_time": round(t_diff, 2)
                                         }
@@ -463,15 +475,18 @@ async def handle_websocket_stream(
             else:
                 # Direct transcript mode: transcribe the entire accumulated audio
                 try:
-                    if language == "auto":
+                    if is_auto_lid:
                         await _detect_language_if_auto(transcribe_source)
                     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                    log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s")
+                    log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s, Language: {language}")
                     t_start = time.time()
                     text = await get_asr_worker().transcribe_async(transcribe_source, language=language)
                     t_end = time.time()
                     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                    log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {(t_end - t_start)*1000:.1f}ms)")
+                    log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {(t_end - t_start)*1000:.1f}ms, Language: {language})")
+                    if is_itn and text.strip():
+                        from utils.pipeline import _normalize_turn
+                        text = _normalize_turn(text, language, itn_backend).get("canonical_text", text)
                     
                     if is_frontend:
                         await send_json_logged({
@@ -483,6 +498,7 @@ async def handle_websocket_stream(
                             "speaker": "Speaker",
                             "final": False,
                             "diarize": is_diarize,
+                            "language_code": language.split("-", 1)[0],
                             "ts_ms": int(time.time() * 1000)
                         })
                     else:
@@ -491,7 +507,7 @@ async def handle_websocket_stream(
                             "type": "data",
                             "data": {
                                 "transcript": text,
-                                "language_code": language,
+                                "language_code": language.split("-", 1)[0],
                                 "metrics": {
                                     "inference_time": round(t_diff, 2)
                                 }
@@ -526,6 +542,7 @@ async def handle_websocket_stream(
                     "speaker": "Speaker",
                     "final": True,
                     "diarize": is_diarize,
+                    "language_code": language.split("-", 1)[0],
                     "ts_ms": int(time.time() * 1000)
                 })
         except Exception:

@@ -374,6 +374,7 @@ function options(fd) {
   fd.append('itn_backend', $('itn').value);
   fd.append('model', $('model').value);
   fd.append('diarize', $('diarize').value);
+  fd.append('denoise', $('denoise').value);
   [['name', 'bias-name'], ['institute_name', 'bias-institute'], ['total_due', 'bias-amount'], ['due_date', 'bias-date']].forEach(([field, id]) => {
     const v = $(id).value.trim();
     if (v) fd.append(field, v);

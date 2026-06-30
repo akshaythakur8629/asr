@@ -29,6 +29,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application source code and static assets
 COPY . .
 
+# Compile WFST grammars for ITN
+RUN python -m itn_service.compile
+
 # Expose the API and frontend port
 EXPOSE 8000
 

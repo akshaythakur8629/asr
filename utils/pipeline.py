@@ -80,7 +80,7 @@ class JobStore:
         self.asr_lock = threading.Lock()
         self.asr_indic_lock = threading.Lock()
 
-    def submit(self, source: Path, filename: str, language="hi-IN", chunk_ms=1120, itn_backend="custom", biasing_context=None, model="sarga:v1", diarize=True) -> dict:
+    def submit(self, source: Path, filename: str, language="hi-IN", chunk_ms=1120, itn_backend="custom", model="sarga:v1", diarize=True, denoise=True) -> dict:
         model = resolve_model(model)
         job_id = uuid.uuid4().hex
         job_dir = self.root / job_id
@@ -88,10 +88,10 @@ class JobStore:
         suffix = Path(filename).suffix or ".webm"
         saved = job_dir / f"input{suffix}"
         shutil.copyfile(source, saved)
-        job = {"id": job_id, "status": "queued", "stage": "queued", "progress": 0, "filename": filename, "language": language, "chunk_ms": chunk_ms, "itn_backend": itn_backend, "biasing_context": biasing_context, "model": model, "created_at": time.time(), "result": None, "error": None, "diarize": diarize}
+        job = {"id": job_id, "status": "queued", "stage": "queued", "progress": 0, "filename": filename, "language": language, "chunk_ms": chunk_ms, "itn_backend": itn_backend, "model": model, "created_at": time.time(), "result": None, "error": None, "diarize": diarize, "denoise": denoise}
         with self.lock:
             self.jobs[job_id] = job
-        self.executor.submit(self._run, job_id, saved, language, chunk_ms, itn_backend, biasing_context, model, diarize)
+        self.executor.submit(self._run, job_id, saved, language, chunk_ms, itn_backend, model, diarize, denoise)
         return self.public(job_id)
 
     def update(self, job_id, **changes):
@@ -131,14 +131,18 @@ class JobStore:
             if DEPLOY_INDIC:
                 if self.asr_indic is None and IndicStreamingASR is not None:
                     self.asr_indic = IndicStreamingASR(device="cuda:0")
-    def _run(self,job_id,source,language,chunk_ms,itn_backend,biasing_context=None,model="sarga:v1",diarize=True):
+    def _run(self,job_id,source,language,chunk_ms,itn_backend,model="sarga:v1",diarize=True,denoise=True):
         job_dir=self.root/job_id; metrics={}; started=time.perf_counter(); biasing_applied=False
         try:
             self.update(job_id,status="running",stage="normalizing",progress=5); t=time.perf_counter()
             normalized=normalize_audio(source,job_dir/"normalized.wav"); metrics["normalize_seconds"]=round(time.perf_counter()-t,3)
             self.update(job_id,stage="loading_models",progress=15); self._ensure_models()
             
-            self.update(job_id,stage="denoising",progress=25); t=time.perf_counter(); denoised=self.preprocessor.denoise_wav(normalized,job_dir/"denoised.wav"); metrics["denoise_seconds"]=round(time.perf_counter()-t,3)
+            if denoise:
+                self.update(job_id,stage="denoising",progress=25); t=time.perf_counter(); denoised=self.preprocessor.denoise_wav(normalized,job_dir/"denoised.wav"); metrics["denoise_seconds"]=round(time.perf_counter()-t,3)
+            else:
+                denoised=normalized
+                metrics["denoise_seconds"]=0.0
             channel_count=probe_channel_count(source); channel_clips={}
             
             turns = None
@@ -199,11 +203,7 @@ class JobStore:
             detected_languages=[]
             asr_lock_to_use = self.asr_indic_lock if model in {"sarga:v1.1", "credresolve:v1"} else self.asr_lock
             with asr_lock_to_use:
-                if model == "sarga:v1":
-                    metrics["biasing"]=self._configure_biasing(language,biasing_context,job_dir)
-                    biasing_applied=bool(metrics["biasing"] and metrics["biasing"].get("applied"))
-                else:
-                    metrics["biasing"]={"applied":False,"reason":"model_not_nemotron"}
+                metrics["biasing"]={"applied":False,"reason":"disabled"}
                     
                 try:
                     for index,turn in enumerate(turns):
@@ -259,21 +259,6 @@ class JobStore:
             self.update(job_id,status="complete",stage="complete",progress=100,result=result)
         except Exception as exc:
             self.update(job_id,status="failed",stage="failed",error=f"{type(exc).__name__}: {exc}",traceback=traceback.format_exc())
-    def _configure_biasing(self,language,biasing_context,job_dir):
-        """Build a per-row boosting-tree phrase pack (Hindi only) and switch the ASR
-        decode to bias toward the row's name/lender/amount/date. Returns a metrics
-        dict; on any failure the job continues unbiased rather than erroring."""
-        if not biasing_context:return None
-        from .biasing_context import build_key_phrases_file,is_hindi
-        if not is_hindi(language):return {"applied":False,"reason":"language_not_hindi"}
-        try:
-            built=build_key_phrases_file(biasing_context,language=language,out_dir=job_dir/"biasing")
-            if not built:return {"applied":False,"reason":"no_usable_fields"}
-            key_file,pack=built
-            self.asr.configure_biasing(key_file)
-            return {"applied":True,"dynamic_phrases":pack.phrase_count_after_pruning,"total_phrases":pack.total_phrase_count,"top_phrases":list(pack.top_phrases),"key_phrases_file":str(key_file)}
-        except Exception as exc:
-            return {"applied":False,"error":f"{type(exc).__name__}: {exc}"}
     def audio_path(self,job_id,kind):
         if kind not in {"normalized","denoised"}:return None
         path=self.root/job_id/f"{kind}.wav"; return path if path.exists() else None
@@ -291,6 +276,8 @@ class JobStore:
 
 def _normalize_turn(text: str, language: str, backend: str) -> dict[str, Any]:
     """Run final-only offline ITN without ever blocking transcript delivery."""
+    if backend == "none":
+        return {"canonical_text": text, "display_text": text, "spans": [], "itn_deferred": True}
     lang = language.split("-", 1)[0] if language and language != "auto" else "hi"
     try:
         from itn_service.runtime.offline_normalizer import OfflineComparison, normalize_offline_text
