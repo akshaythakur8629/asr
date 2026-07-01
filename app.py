@@ -35,15 +35,23 @@ def deprecated(func):
 
 app=FastAPI(title="Nemotron Streaming ASR Test")
 
+# Allow large audio file uploads (up to 500 MB) — telephony call recordings
+# can exceed Starlette's default 1MB multipart limit
+try:
+    from starlette.middleware.base import BaseHTTPMiddleware  # noqa
+    app.state.max_upload_size = 500 * 1024 * 1024  # 500 MB
+except Exception:
+    pass
+
 @app.middleware("http")
 async def log_http_requests(request: Request, call_next):
     request_id = uuid.uuid4().hex[:8]
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
     
     # Check content type of request
-    content_type = request.headers.get("content-type", "")
+    content_type = request.headers.get("content-type", "").lower()
     body_str = ""
-    if "multipart/form-data" in content_type:
+    if "multipart/" in content_type:
         body_str = "[Multipart Form Data]"
     else:
         try:
@@ -197,15 +205,28 @@ def evaluation(filename:str):
         },
     }
 @app.post("/api/jobs")
-def create_job(file:UploadFile=File(...),language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),model:str=Form("sarga:v1"),diarize:bool=Form(True),denoise:bool=Form(True)):
-    if chunk_ms not in {80,160,320,560,1120}:raise HTTPException(400,"Unsupported chunk size")
+async def create_job(file:UploadFile=File(...),language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),model:str=Form("sarga:v1"),diarize:bool=Form(True),denoise:bool=Form(True)):
+    # Allow any chunk_ms — clamp to nearest valid model window if needed
+    valid_chunks = {80, 160, 320, 560, 1120}
+    if chunk_ms not in valid_chunks:
+        chunk_ms = min(valid_chunks, key=lambda v: abs(v - chunk_ms))
     if itn_backend not in {"custom","nemo","compare","none"}:raise HTTPException(400,"Unsupported ITN backend")
     model = resolve_model(model)
     if model not in {"sarga:v1", "credresolve:v1"}:raise HTTPException(400,"Unsupported model name")
-    with tempfile.NamedTemporaryFile(delete=False,suffix=Path(file.filename or "audio.webm").suffix) as temp:
-        shutil.copyfileobj(file.file,temp); path=Path(temp.name)
-    try:return store.submit(path,file.filename or "recording.webm",language,chunk_ms,itn_backend,model,diarize,denoise)
-    finally:path.unlink(missing_ok=True)
+    path = None
+    try:
+        content = await file.read()
+        with tempfile.NamedTemporaryFile(delete=False,suffix=Path(file.filename or "audio.webm").suffix) as temp:
+            temp.write(content)
+            path = Path(temp.name)
+        return store.submit(path,file.filename or "recording.webm",language,chunk_ms,itn_backend,model,diarize,denoise)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Job submission failed: {type(e).__name__}: {e}")
+    finally:
+        if path:
+            path.unlink(missing_ok=True)
 @app.post("/api/jobs/sample/{filename}")
 def create_sample_job(filename:str,language:str=Form("hi-IN"),chunk_ms:int=Form(1120),itn_backend:str=Form("custom"),model:str=Form("sarga:v1"),diarize:bool=Form(True),denoise:bool=Form(True)):
     source=(ROOT/"recording"/Path(filename).name)
@@ -283,27 +304,29 @@ async def ws_stt(
     
     call_code = websocket.query_params.get("call_code") or websocket.query_params.get("call-code")
     
-    # Force vad to be false for this endpoint as requested
-    vad = "false"
-    
-    # Map flush_signal query parameter (defaults to "false")
+    # Read VAD from query param — if client passes flush_signal=true (telephony mode)
+    # enable server-side Silero VAD to auto-detect speech boundaries
     flush_signal = websocket.query_params.get("flush_signal") or "false"
+    # Enable VAD when flush_signal=true so server auto-flushes on speech end
+    vad = "true" if flush_signal.lower() == "true" else (websocket.query_params.get("vad") or "false")
     
     model = websocket.query_params.get("model") or "sarga:v1"
     diarize = websocket.query_params.get("diarize") or "false"
     itn = websocket.query_params.get("itn") or "false"
     itn_backend = websocket.query_params.get("itn_backend") or "custom"
+    # Read denoise from query param (default true for quality)
+    denoise = websocket.query_params.get("denoise") or "true"
     
-    # Run in Immediate Mode (chunk_ms=0, denoise=true)
+    # Use chunk_ms=80 for optimal internal inference windowing (matches batch API)
     await handle_websocket_stream(
         websocket=websocket,
         store=store,
         language=language,
-        denoise="true",
+        denoise=denoise,
         vad=vad,
         diarize=diarize,
         input_rate=input_rate,
-        chunk_ms=0,
+        chunk_ms=80,
         call_code=call_code,
         flush_signal=flush_signal,
         model=model,

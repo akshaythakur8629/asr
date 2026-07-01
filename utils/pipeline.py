@@ -63,7 +63,7 @@ if DEPLOY_INDIC:
 
 
 class JobStore:
-    def __init__(self, root=Path("/tmp/nemotron-test"), ttl_seconds=14400):
+    def __init__(self, root=Path("/tmp/nemotron-test"), ttl_seconds=259200):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.ttl = ttl_seconds

@@ -1,6 +1,7 @@
 import logging
 from logging.handlers import RotatingFileHandler
 import shutil
+import numpy as np
 import uuid
 import asyncio
 import time
@@ -76,7 +77,7 @@ async def handle_websocket_stream(
     is_auto_lid = (language == "auto")
     
     async def _detect_language_if_auto(wav_path: Path):
-        nonlocal language
+        nonlocal language, is_auto_lid
         if not is_auto_lid:
             return language
         
@@ -129,6 +130,18 @@ async def handle_websocket_stream(
     # Store audio as raw bytearray of 16-bit mono 16kHz PCM
     audio_buffer = bytearray()
     flush_requested = False
+    chunk_index = 0
+    
+    session_metrics = {
+        "total_chunks": 0,
+        "total_duration": 0.0,
+        "lid_locks": 0,
+        "empty_responses": 0,
+        "average_confidence": 0.0,
+        "total_confidence": 0.0,
+        "average_latency_ms": 0.0,
+        "total_latency_ms": 0.0
+    }
     
     async def receive_loop():
         nonlocal last_data_time, flush_requested, last_processed_len, input_rate, model
@@ -227,26 +240,26 @@ async def handle_websocket_stream(
                     current_len = len(audio_buffer)
                     duration = current_len / (input_rate * 2.0)
                     
+                    # Don't send audio that is too short for reliable ASR (< 0.5s)
+                    if duration < 0.5:
+                        log_event(f"[Flush Skip] Audio too short ({duration:.2f}s < 0.5s) for Session: {session_id}. Accumulating.")
+                        continue
+                    
                     if current_len > 0:
+                        # 1. Energy Gate Calculation
+                        samples_check = np.frombuffer(bytes(audio_buffer), dtype=np.int16).astype(np.float32) / 32768.0
+                        rms_val = np.sqrt(np.mean(samples_check ** 2)) if len(samples_check) > 0 else 0.0
+                        rms_db = 20 * np.log10(rms_val) if rms_val > 0 else -100.0
+                        
+                        is_above_gate = bool(rms_db > -45.0)
+                        
                         raw_wav_path = session_dir / "raw.wav"
                         if input_rate != 16000:
                             raw_in_path = session_dir / "raw_in.wav"
                             await asyncio.to_thread(write_pcm16_wav, raw_in_path, bytes(audio_buffer), input_rate)
-                            try:
-                                import shutil
-                                shutil.copyfile(raw_in_path, "/app/logs/debug.wav")
-                                log_event(f"[DEBUG_WAV] Saved 8kHz raw input to /app/logs/debug.wav")
-                            except Exception as ex:
-                                log_event(f"[DEBUG_WAV] Error saving copy: {ex}")
                             await asyncio.to_thread(normalize_audio, raw_in_path, raw_wav_path, 16000)
                         else:
                             await asyncio.to_thread(write_pcm16_wav, raw_wav_path, bytes(audio_buffer), 16000)
-                            try:
-                                import shutil
-                                shutil.copyfile(raw_wav_path, "/app/logs/debug.wav")
-                                log_event(f"[DEBUG_WAV] Saved 16kHz raw input to /app/logs/debug.wav")
-                            except Exception as ex:
-                                log_event(f"[DEBUG_WAV] Error saving copy: {ex}")
                         
                         transcribe_source = raw_wav_path
                         if is_denoise and store.preprocessor:
@@ -257,37 +270,89 @@ async def handle_websocket_stream(
                             except Exception as e:
                                 print(f"Flush Denoise error: {e}")
                         
+                        text = ""
+                        inference_time_ms = 0.0
+                        
+                        if is_above_gate:
+                            try:
+                                if is_auto_lid:
+                                    await _detect_language_if_auto(transcribe_source)
+                                now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                                log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s on flush (Energy: {rms_db:.1f}dB), Language: {language}")
+                                
+                                t_start = time.time()
+                                text = await get_asr_worker().transcribe_async(transcribe_source, language=language, chunk_ms=80)
+                                t_end = time.time()
+                                inference_time_ms = (t_end - t_start) * 1000.0
+                                
+                                now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                                log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {inference_time_ms:.1f}ms, Language: {language})")
+                                
+                                if is_itn and text.strip():
+                                    from utils.pipeline import _normalize_turn
+                                    text = _normalize_turn(text, language, itn_backend).get("canonical_text", text)
+                            except Exception as e:
+                                print(f"ASR error on flush: {e}")
+                        else:
+                            log_event(f"[Energy Gate] Audio energy too low: {rms_db:.1f}dB <= -45.0dB. Skipping ASR for Session: {session_id}.")
+                        
+                        # 2. Sequential Chunk File Debugging
                         try:
-                            if is_auto_lid:
-                                await _detect_language_if_auto(transcribe_source)
-                            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                            log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s on flush, Language: {language}")
+                            chunk_index += 1
+                            chunk_wav_path = session_dir / f"chunk_{chunk_index:03d}.wav"
+                            chunk_json_path = session_dir / f"chunk_{chunk_index:03d}.json"
                             
-                            t_start = time.time()
-                            text = await get_asr_worker().transcribe_async(transcribe_source, language=language)
-                            t_end = time.time()
-                            inference_time_ms = (t_end - t_start) * 1000.0
+                            shutil.copyfile(transcribe_source, chunk_wav_path)
                             
-                            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                            log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {inference_time_ms:.1f}ms, Language: {language})")
+                            # Also copy to host debug directory if writable
+                            try:
+                                shutil.copyfile(transcribe_source, f"/app/logs/chunk_{chunk_index:03d}.wav")
+                            except Exception:
+                                pass
                             
-                            if is_itn and text.strip():
-                                from utils.pipeline import _normalize_turn
-                                text = _normalize_turn(text, language, itn_backend).get("canonical_text", text)
+                            chunk_meta = {
+                                "chunk_id": f"chunk_{chunk_index:03d}",
+                                "duration": round(duration, 2),
+                                "language": language.split("-", 1)[0],
+                                "energy_db": round(rms_db, 2),
+                                "above_gate": is_above_gate,
+                                "inference_time_ms": round(inference_time_ms, 2),
+                                "transcript": text
+                            }
                             
-                            response_data = {
-                                "type": "data",
-                                "data": {
-                                    "transcript": text,
-                                    "language_code": language.split("-", 1)[0],
-                                    "metrics": {
-                                        "inference_time": round(inference_time_ms, 2)
-                                    }
+                            with open(chunk_json_path, "w", encoding="utf-8") as f:
+                                json.dump(chunk_meta, f, ensure_ascii=False, indent=2)
+                            
+                            try:
+                                with open(f"/app/logs/chunk_{chunk_index:03d}.json", "w", encoding="utf-8") as f:
+                                    json.dump(chunk_meta, f, ensure_ascii=False, indent=2)
+                            except Exception:
+                                pass
+                        except Exception as ex:
+                            log_event(f"[DEBUG_CHUNK] Error saving chunk info: {ex}")
+                        
+                        # 3. Metrics Tracking
+                        session_metrics["total_chunks"] += 1
+                        session_metrics["total_duration"] += duration
+                        session_metrics["total_latency_ms"] += inference_time_ms
+                        if not text.strip():
+                            session_metrics["empty_responses"] += 1
+                        
+                        avg_latency = session_metrics["total_latency_ms"] / session_metrics["total_chunks"]
+                        rtf = (session_metrics["total_latency_ms"] / 1000.0) / max(0.01, session_metrics["total_duration"])
+                        log_event(f"[METRICS] Session: {session_id} | Chunks: {session_metrics['total_chunks']} | Avg Latency: {avg_latency:.1f}ms | RTF: {rtf:.3f}")
+                        
+                        response_data = {
+                            "type": "data",
+                            "data": {
+                                "transcript": text,
+                                "language_code": language.split("-", 1)[0],
+                                "metrics": {
+                                    "inference_time": round(inference_time_ms, 2)
                                 }
                             }
-                            await send_json_logged(response_data)
-                        except Exception as e:
-                            print(f"ASR error on flush: {e}")
+                        }
+                        await send_json_logged(response_data)
                     else:
                         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                         log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting empty buffer (0.00s) on flush")
@@ -304,8 +369,15 @@ async def handle_websocket_stream(
                         }
                         await send_json_logged(response_data)
                     
+                    # 4. Overlap Audio Context Preservation (Keep last 500ms)
+                    overlap_sec = 0.5
+                    overlap_len = int(input_rate * overlap_sec * 2.0)
+                    
+                    overlap_bytes = audio_buffer[-overlap_len:] if len(audio_buffer) > overlap_len else audio_buffer[:]
                     audio_buffer.clear()
-                    last_processed_len = 0
+                    audio_buffer.extend(overlap_bytes)
+                    
+                    last_processed_len = len(audio_buffer)
                     last_finalized_end_sec = 0.0
                     continue
                 
@@ -340,7 +412,7 @@ async def handle_websocket_stream(
                                 await _detect_language_if_auto(transcribe_source)
                             log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting full audio: {duration:.2f}s on auto-flush")
                             t_start = time.time()
-                            text = await get_asr_worker().transcribe_async(transcribe_source, language=language)
+                            text = await get_asr_worker().transcribe_async(transcribe_source, language=language, chunk_ms=80)
                             t_end = time.time()
                             inference_time_ms = (t_end - t_start) * 1000.0
                             
@@ -437,7 +509,7 @@ async def handle_websocket_stream(
                                 now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                                 log_event(f"[{now_str}] [ASR] [REQ] [Session: {session_id}] Submitting turn slice: {span_start:.2f}s - {span_end:.2f}s, Language: {language}")
                                 t_start = time.time()
-                                text = await get_asr_worker().transcribe_async(turn_wav_path, language=language)
+                                text = await get_asr_worker().transcribe_async(turn_wav_path, language=language, chunk_ms=80)
                                 t_end = time.time()
                                 now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                                 log_event(f"[{now_str}] [ASR] [RES] [Session: {session_id}] Received text: '{text}' (Inference Time: {(t_end - t_start)*1000:.1f}ms, Language: {language})")

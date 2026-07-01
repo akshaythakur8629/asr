@@ -58,6 +58,32 @@ _TERMS = (
     ("ड्यू", "due"),
     ("लेट", "late"),
     ("फ्री", "free"),
+    ("थैंक यू", "thank you"),
+    ("बाय", "bye"),
+    ("बाय बाय", "bye bye"),
+    # Bengali
+    ("থ্যাঙ্ক ইউ", "thank you"),
+    ("থ্যাংক ইউ", "thank you"),
+    ("বাই", "bye"),
+    ("বাই বাই", "bye bye"),
+    # Telugu
+    ("థాంక్యూ", "thank you"),
+    ("బై", "bye"),
+    ("బై బై", "bye bye"),
+    # Tamil
+    ("தேங்க்யூ", "thank you"),
+    ("பை", "bye"),
+    ("பை பை", "bye bye"),
+    # Kannada
+    ("ಥ್ಯಾಂಕ್ ಯೂ", "thank you"),
+    ("ಥ್ಯಾಂಕ್ಯೂ", "thank you"),
+    ("ಬೈ", "bye"),
+    ("ಬೈ ಬೈ", "bye bye"),
+    # Gujarati
+    ("થેન્ક યુ", "thank you"),
+    ("થેન્ક્યુ", "thank you"),
+    ("બાય", "bye"),
+    ("બાય બાય", "bye bye"),
     ("ओके", "OK"),
 )
 

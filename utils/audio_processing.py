@@ -27,7 +27,12 @@ TARGET_SAMPLE_RATE = 16000
 
 def normalize_audio(source: Path, destination: Path, sample_rate: int = TARGET_SAMPLE_RATE) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(source), "-ac", "1", "-ar", str(sample_rate), "-c:a", "pcm_s16le", str(destination)], check=True)
+    try:
+        # Try high-quality soxr resampling first
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(source), "-af", "aresample=resampler=soxr", "-ar", str(sample_rate), "-c:a", "pcm_s16le", str(destination)], check=True)
+    except subprocess.CalledProcessError:
+        # Fallback to standard resampling if libsoxr is not compiled in FFmpeg
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(source), "-ac", "1", "-ar", str(sample_rate), "-c:a", "pcm_s16le", str(destination)], check=True)
     return destination
 
 def probe_channel_count(source: Path) -> int:
