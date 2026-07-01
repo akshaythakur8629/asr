@@ -138,7 +138,9 @@ async def handle_websocket_stream(
                 if msg.get("type") == "websocket.disconnect":
                     break
                 if "bytes" in msg and msg["bytes"]:
-                    audio_buffer.extend(msg["bytes"])
+                    raw_bytes = msg["bytes"]
+                    log_event(f"[DEBUG_PACKET] binary input_rate={input_rate}, len(raw_bytes)={len(raw_bytes)}, hex={raw_bytes[:16].hex()}")
+                    audio_buffer.extend(raw_bytes)
                     last_data_time = time.time()
                 elif "text" in msg and msg["text"]:
                     try:
@@ -163,6 +165,7 @@ async def handle_websocket_stream(
                                     input_rate = int(s_rate)
                                 if audio_data:
                                     raw_bytes = base64.b64decode(audio_data)
+                                    log_event(f"[DEBUG_PACKET] input_rate={input_rate}, len(raw_bytes)={len(raw_bytes)}, hex={raw_bytes[:16].hex()}")
                                     audio_buffer.extend(raw_bytes)
                                     last_data_time = time.time()
                             
@@ -229,9 +232,21 @@ async def handle_websocket_stream(
                         if input_rate != 16000:
                             raw_in_path = session_dir / "raw_in.wav"
                             await asyncio.to_thread(write_pcm16_wav, raw_in_path, bytes(audio_buffer), input_rate)
+                            try:
+                                import shutil
+                                shutil.copyfile(raw_in_path, "/app/logs/debug.wav")
+                                log_event(f"[DEBUG_WAV] Saved 8kHz raw input to /app/logs/debug.wav")
+                            except Exception as ex:
+                                log_event(f"[DEBUG_WAV] Error saving copy: {ex}")
                             await asyncio.to_thread(normalize_audio, raw_in_path, raw_wav_path, 16000)
                         else:
                             await asyncio.to_thread(write_pcm16_wav, raw_wav_path, bytes(audio_buffer), 16000)
+                            try:
+                                import shutil
+                                shutil.copyfile(raw_wav_path, "/app/logs/debug.wav")
+                                log_event(f"[DEBUG_WAV] Saved 16kHz raw input to /app/logs/debug.wav")
+                            except Exception as ex:
+                                log_event(f"[DEBUG_WAV] Error saving copy: {ex}")
                         
                         transcribe_source = raw_wav_path
                         if is_denoise and store.preprocessor:
